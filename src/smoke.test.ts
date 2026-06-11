@@ -945,7 +945,7 @@ test('buildChartBlocks skips metrics with only one datapoint (not a comparison)'
 });
 
 test('buildChartBlocks returns empty array when no quantitative facts', () => {
-  const facts = [makeExtractedFact({ quantity: undefined })];
+  const facts = [makeExtractedFact()];
   const charts = buildChartBlocks(facts, []);
   assert.equal(charts.length, 0, 'no quantitative facts → no charts');
 });
