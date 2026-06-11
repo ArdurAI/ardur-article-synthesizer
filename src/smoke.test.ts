@@ -227,11 +227,15 @@ test('isQuoteWithinLimit rejects long quotes', () => {
   assert.ok(!isQuoteWithinLimit(longQuote));
 });
 
-test('isQuoteWithinLimit at exact boundary', () => {
+test('isQuoteWithinLimit at exact boundary — spec is strictly < 25 words', () => {
+  // 24 words: the last passing value (24 < 25 = true)
+  const exactly24 = Array.from({ length: 24 }, (_, i) => `word${i}`).join(' ');
+  assert.ok(isQuoteWithinLimit(exactly24), '24 words should pass (< 25)');
+  // 25 words: fails closed — 25 is NOT < 25 (off-by-one guard, issue #7)
   const exactly25 = Array.from({ length: 25 }, (_, i) => `word${i}`).join(' ');
-  assert.ok(isQuoteWithinLimit(exactly25));
+  assert.ok(!isQuoteWithinLimit(exactly25), '25 words should fail (not strictly < 25)');
   const exactly26 = Array.from({ length: 26 }, (_, i) => `word${i}`).join(' ');
-  assert.ok(!isQuoteWithinLimit(exactly26));
+  assert.ok(!isQuoteWithinLimit(exactly26), '26 words should fail');
 });
 
 test('longestVerbatimRun finds no overlap between unrelated texts', () => {
@@ -360,6 +364,24 @@ test('validateRenderable flags raw HTML in text', () => {
   assert.ok(violations.some((v) => v.kind === 'raw-html-in-text'));
 });
 
+// Issue #10: XSS screen must also cover block.items[] (list items), not just block.text
+test('validateRenderable flags raw HTML injected into a list item', () => {
+  const article: SynthesizedArticle = {
+    id: 'test', rank: 1, topic: 'test', topicLabel: 'Test', headline: 'Test', dek: 'Test',
+    body: [{
+      type: 'list',
+      items: ['Normal list item', '<script>alert(1)</script> injected item'],
+    }],
+    keyPoints: [], whyItMatters: '', readerAction: '', tags: [], confidence: 'high', sourceQuality: 'corroborated',
+    references: [{ source: 'T', sourceDomain: 't.com', tier: 'news', url: 'https://t.com', title: 'T', publishedAt: NOW.toISOString() }],
+    provenance: { clusterId: 'c1', sourceCount: 1, distinctDomains: 1, upstreamRunId: 'run-1' },
+    ai: { provider: 'deterministic', model: 'rules/v1', status: 'fallback', generatedAt: NOW.toISOString() },
+    legalNote: '', wordCount: 5, readingTimeMinutes: 1, generatedAt: NOW.toISOString(),
+  };
+  const violations = validateRenderable(article);
+  assert.ok(violations.some((v) => v.kind === 'raw-html-in-text'), 'raw HTML in list item must be caught');
+});
+
 // ---------------------------------------------------------------------------
 // Provenance gating
 // ---------------------------------------------------------------------------
@@ -388,6 +410,28 @@ test('buildProvenance maps factual claims with matching tokens to sources', () =
 test('isFullyGrounded fails when unsupportedClaimCount > 0', () => {
   const map = { claims: [], citedSources: [], unsupportedClaimCount: 1 };
   assert.ok(!isFullyGrounded(map));
+});
+
+// Issue #9: ratio-based threshold prevents on-topic hallucinations from being auto-grounded
+test('buildProvenance does not ground on-topic hallucinations via topic-word overlap alone', () => {
+  // Claim has 10 distinct content tokens; only 1 ('pytorch') matches the source distinctly.
+  // threshold = max(2, ceil(10 * 0.25)) = 3; 1 < 3 => unsupported.
+  const claims = [{
+    text: 'pytorch released beverage product distribution channel retail exclusive launch strategy',
+    blockIndex: 0,
+    isEditorial: false,
+  }];
+  const sources = [{
+    source: 'PyTorch',
+    sourceDomain: 'pytorch.org',
+    tier: 'primary' as const,
+    url: 'https://pytorch.org',
+    title: 'PyTorch 2.6 compile improvements',
+    publishedAt: NOW.toISOString(),
+  }];
+  const map = buildProvenance('art-1', claims, sources);
+  assert.ok(map.unsupportedClaimCount > 0, 'on-topic hallucination must be unsupported');
+  assert.ok(!isFullyGrounded(map), 'article with hallucinated claim must not be fully grounded');
 });
 
 // ---------------------------------------------------------------------------
@@ -558,6 +602,19 @@ test('deterministic provider uses zero generation budget', async () => {
   const fallback = buildDeterministicDraft({ topic: 'ai-models', topicLabel: 'AI Models', headline: 'Test', references: refs, voiceDirective: '' });
   await p.generate({ topic: 'ai-models', topicLabel: 'AI Models', headline: 'Test', references: refs, fallback, voiceDirective: '' });
   assert.equal(p.generationsUsed(), 0, 'deterministic should not consume budget');
+});
+
+// Issue #8: injected `now` must appear in generatedAt — determinism under replay
+test('createProvider threads now into provider so generatedAt is deterministic', async () => {
+  const now = new Date('2026-06-11T06:00:00Z');
+  const p = createProvider({ provider: 'deterministic', now });
+  const refs = makeEntry().references;
+  const fallback = buildDeterministicDraft({ topic: 'test', topicLabel: 'Test', headline: 'Test', references: refs, voiceDirective: '' });
+  const req = { topic: 'test', topicLabel: 'Test', headline: 'Test', references: refs, fallback, voiceDirective: '' };
+  const r1 = await p.generate(req);
+  const r2 = await p.generate(req);
+  assert.equal(r1.meta.generatedAt, now.toISOString(), 'generatedAt must equal the injected now');
+  assert.equal(r1.meta.generatedAt, r2.meta.generatedAt, 'identical inputs + now => identical generatedAt');
 });
 
 // ---------------------------------------------------------------------------

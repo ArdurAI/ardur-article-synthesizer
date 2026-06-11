@@ -86,12 +86,17 @@ export function buildProvenance(
 
     if (!claim.isEditorial) {
       const claimTokens = new Set(contentTokens(claim.text));
+      // Require at least 25% of the claim's distinct content tokens to match the
+      // source's tokens (floor: 2). Counting *distinct* matching tokens prevents
+      // a repeated source-name token from satisfying the threshold by itself.
+      // This stops on-topic hallucinations that share only topic-level vocabulary
+      // (e.g. "pytorch", "compile") from being auto-grounded.
+      const threshold = Math.max(2, Math.ceil(claimTokens.size * 0.25));
 
       for (const source of sources) {
         const srcTokens = contentTokens(`${source.title} ${source.source} ${source.sourceDomain}`);
-        // At least 2 meaningful token matches qualifies as support
-        const matchCount = srcTokens.filter((t) => claimTokens.has(t)).length;
-        if (matchCount >= 2) {
+        const matchCount = new Set(srcTokens.filter((t) => claimTokens.has(t))).size;
+        if (matchCount >= threshold) {
           const sid = sourceRefId(source);
           supportingSourceIds.push(sid);
           citedSourceIdSet.add(sid);

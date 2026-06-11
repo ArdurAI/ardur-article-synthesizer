@@ -89,7 +89,7 @@ export function enforceCopyright(
     if (block.text && !isQuoteWithinLimit(block.text)) {
       violations.push({
         kind: 'quote-too-long',
-        detail: `Quote in block ${i} exceeds ${MAX_QUOTE_WORDS} words (${block.text.split(/\s+/).length} words found)`,
+        detail: `Quote in block ${i} must be strictly less than ${MAX_QUOTE_WORDS} words (${block.text.split(/\s+/).length} words found)`,
         locator: String(i),
       });
     }
@@ -152,10 +152,10 @@ export function enforceCopyright(
   return { ok: violations.length === 0, violations };
 }
 
-/** True iff `text` is a quote of <= MAX_QUOTE_WORDS words. */
+/** True iff `text` is a quote of strictly < MAX_QUOTE_WORDS words. */
 export function isQuoteWithinLimit(text: string, maxWords: number = MAX_QUOTE_WORDS): boolean {
   const words = text.trim().split(/\s+/).filter((w) => w.length > 0);
-  return words.length <= maxWords;
+  return words.length < maxWords;
 }
 
 /**

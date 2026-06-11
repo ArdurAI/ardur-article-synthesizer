@@ -102,12 +102,15 @@ export function validateRenderable(article: SynthesizedArticle): RenderViolation
       });
     }
 
-    // 3. Raw HTML in text (XSS guard — block text is rendered as plain text in-app)
+    // 3. Raw HTML in text or list items (XSS guard — all content renders as plain text in-app)
     const textContent = block.text ?? '';
-    if (RAW_HTML_PATTERN.test(textContent)) {
+    const hasRawHtml =
+      RAW_HTML_PATTERN.test(textContent) ||
+      (block.items ?? []).some((item) => RAW_HTML_PATTERN.test(item));
+    if (hasRawHtml) {
       violations.push({
         kind: 'raw-html-in-text',
-        detail: `Raw HTML detected in block text at index ${i}`,
+        detail: `Raw HTML detected in block at index ${i}`,
         blockIndex: i,
       });
     }

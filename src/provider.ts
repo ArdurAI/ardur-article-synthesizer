@@ -97,6 +97,8 @@ export interface ProviderConfig {
   maxGenerations?: number;
   timeoutMs?: number;
   env?: NodeJS.ProcessEnv;
+  /** Injected wall-clock instant; threads into all providers so generatedAt is deterministic under replay. */
+  now?: Date;
 }
 
 // ---------------------------------------------------------------------------
@@ -676,8 +678,12 @@ export function createProvider(config: ProviderConfig = {}): AiProvider {
   const timeoutMs = config.timeoutMs
     ?? parseInt(env['ARDUR_AI_TIMEOUT_MS'] ?? '20000', 10);
 
+  const now = config.now;
+  // Helpers to avoid passing `now: undefined` under exactOptionalPropertyTypes.
+  const nowOpt = now !== undefined ? { now } : {};
+
   if (!enabled || providerName === 'deterministic') {
-    return new DeterministicProvider();
+    return new DeterministicProvider(now);
   }
 
   if (providerName === 'ollama') {
@@ -685,22 +691,23 @@ export function createProvider(config: ProviderConfig = {}): AiProvider {
     const baseUrl = apiKey
       ? (env['OLLAMA_API_BASE'] ?? 'https://api.ollama.ai')
       : 'http://127.0.0.1:11434';
-    return new OllamaProvider({ maxGenerations, timeoutMs, baseUrl });
+    return new OllamaProvider({ maxGenerations, timeoutMs, baseUrl, ...nowOpt });
   }
 
   if (providerName === 'openai') {
     const apiKey = env['OPENAI_API_KEY'];
     if (!apiKey) {
-      return new DeterministicProvider();
+      return new DeterministicProvider(now);
     }
     return new OpenAiProvider({
       maxGenerations,
       timeoutMs,
       apiKey,
       model: env['OPENAI_MODEL'] ?? 'gpt-4o-mini',
+      ...nowOpt,
     });
   }
 
-  return new DeterministicProvider();
+  return new DeterministicProvider(now);
 }
 
