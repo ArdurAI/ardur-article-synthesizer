@@ -53,6 +53,7 @@ that the ardur.ai app renders directly.
 | **Provenance per claim** | Every factual claim is tied to its supporting sources; ungrounded claims never ship. | [`src/provenance.ts`](./src/provenance.ts) |
 | **Privacy** | No PII in URLs or logs; tracking params stripped; metric/log keys screened against `FORBIDDEN_METRIC_KEY_FRAGMENTS`. | [`src/privacy.ts`](./src/privacy.ts) |
 | **In-app render** | Typed `ArticleBlock[]`, source trail kept separate from prose, no external navigation. | [`src/render.ts`](./src/render.ts) |
+| **House voice** | "GenZ-but-professional" — engaging, plain-language, fully sourced, never dry newswire or hype. Same voice on the LLM **and** budget=0 paths. | [`src/style.ts`](./src/style.ts) · [`docs/voice.md`](./docs/voice.md) |
 
 ## Quick start
 
@@ -106,11 +107,13 @@ briefs → full original articles**. Migration points are documented in
 ARCHITECTURE.md        Pipeline-wide architecture (mirrored across all 4 repos)
 README.md              This file
 docs/spec.md           Full design specification (diagrams, schemas, rules)
+docs/voice.md          Authoritative voice & style spec (GenZ-but-professional)
 src/contracts.ts       Shared wire contract (vendored, identical across repos)
 src/index.ts           Public entrypoint: runSynthesis()
 src/synthesize.ts      Cycle orchestration
 src/provider.ts        Pluggable, cost-guarded AI provider chain
-src/assemble.ts        Article assembly rules (weave + sections + blocks)
+src/assemble.ts        Article assembly rules (weave + sections + blocks + voice)
+src/style.ts           Voice & style config (VOICE_STYLE) wired into assembly
 src/copyright.ts       Copyright-safety gate
 src/provenance.ts      Per-claim provenance
 src/render.ts          In-app render contract

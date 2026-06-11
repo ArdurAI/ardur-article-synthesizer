@@ -20,6 +20,11 @@
  * The deterministic path is NOT a degraded stub: it is a real rules-based
  * assembler over the cluster's metadata (headlines, sources, dates) and MUST
  * produce a valid, copyright-safe article on its own. AI only improves prose.
+ *
+ * VOICE: both paths share the Ardur house voice ("GenZ-but-professional", see
+ * `style.ts` + docs/voice.md). The LLM path receives `GenerateRequest.voiceDirective`
+ * in its prompt; the deterministic path parameterizes its templates from the
+ * same `VOICE_STYLE`, so a budget=0 article reads on-voice — not as dry newswire.
  */
 
 import type { ProviderMeta, Confidence, SourceRef } from './contracts.ts';
@@ -36,6 +41,13 @@ export interface GenerateRequest {
   references: SourceRef[];
   /** Deterministic draft used as the fallback AND as grounding for the model. */
   fallback: ArticleDraft;
+  /**
+   * The Ardur house-voice directive (from `style.ts:buildVoiceDirective`),
+   * threaded verbatim into the model prompt. The SAME directive parameterizes
+   * the deterministic fallback templates, so budget=0 output reads on-voice too.
+   * See docs/voice.md.
+   */
+  voiceDirective: string;
 }
 
 /** The structured draft a provider returns. Validated against ARTICLE_SCHEMA. */

@@ -15,7 +15,7 @@
 2. [Architecture overview](#2-architecture-overview)
 3. [Data-flow diagrams](#3-data-flow-diagrams)
 4. [Inputs, outputs & schemas](#4-inputs-outputs--schemas)
-5. [Article assembly rules](#5-article-assembly-rules)
+5. [Article assembly rules](#5-article-assembly-rules) · [5.4 Voice & style](#54-voice--style) → [`voice.md`](./voice.md)
 6. [In-app render contract](#6-in-app-render-contract)
 7. [Copyright-safe synthesis](#7-copyright-safe-synthesis)
 8. [Cost-guarded, pluggable AI provider](#8-cost-guarded-pluggable-ai-provider)
@@ -244,6 +244,28 @@ the floor from available metadata is emitted with `confidence: low` and a warnin
 - Corroborated facts (≥2 distinct sources) are stated plainly; single-source
   facts are hedged ("according to …", reflected in `confidence`).
 - The synthesizer writes *about* the sources; it never stitches their sentences.
+
+### 5.4 Voice & style
+
+Every article is written in the **Ardur house voice** —
+**"GenZ-but-professional"**: credible and fully sourced, but engaging,
+plain-language, and a little irreverent rather than dry newswire. The voice is
+encoded as code in [`src/style.ts`](../src/style.ts) (`VOICE_STYLE`,
+`SECTION_VOICE`) and specified authoritatively in **[`voice.md`](./voice.md)**
+(DO/DON'T, before→after examples, tone guardrails).
+
+Wiring (one source of truth, both provider paths):
+
+- `planAssembly` attaches per-section voice directives to the `AssemblyPlan`
+  (`voiceDirectives`), built from `style.ts:buildVoiceDirective`.
+- The LLM path threads the directive into the prompt via
+  `GenerateRequest.voiceDirective`; the deterministic/budget=0 path parameterizes
+  its templates from the **same** `VOICE_STYLE`, so a zero-cost article still
+  reads on-voice.
+- `lintVoice` runs on both outputs as a non-blocking polish pass.
+
+Precedence: voice is a prose layer and **yields to** accuracy → sourcing →
+copyright → privacy → render. See [`voice.md`](./voice.md) for the full contract.
 
 ## 6. In-app render contract
 

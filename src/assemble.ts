@@ -16,9 +16,19 @@
  *  - inserts at most one short (< 25-word) attributed quote where a primary
  *    source's exact wording is editorially necessary.
  *  - computes wordCount + readingTime and the source-trail block.
+ *
+ * VOICE: every section is assembled in the Ardur house voice
+ * ("GenZ-but-professional", see `style.ts` + docs/voice.md). The plan carries a
+ * per-section voice directive that is threaded into BOTH the provider prompt and
+ * the deterministic fallback templates, so a budget=0 article still reads in
+ * voice rather than as dry newswire. Voice never overrides the copyright,
+ * provenance, or render gates.
  */
 
 import type { ArticleBlock, SynthesizedArticle, AggregatedItem, Top10Entry } from './contracts.ts';
+import { VOICE_STYLE, SECTION_VOICE, buildVoiceDirective, type VoiceStyle } from './style.ts';
+
+export { VOICE_STYLE, SECTION_VOICE, buildVoiceDirective };
 
 /** Canonical section ids, in render order. */
 export type SectionId =
@@ -62,28 +72,41 @@ export interface AssemblyPlan {
   /** Reference list after dedup + cap. */
   references: AggregatedItem[];
   sections: readonly SectionSpec[];
+  /** The voice this article is written in (defaults to VOICE_STYLE). */
+  voice: VoiceStyle;
+  /**
+   * Per-section voice directive (from `buildVoiceDirective`), threaded into both
+   * the provider prompt and the deterministic fallback so both paths sound the
+   * same. Keyed by SectionId.
+   */
+  voiceDirectives: Record<SectionId, string>;
 }
 
 /**
  * Build the deterministic weave/reference plan for a Top-10 entry from its
- * cluster members. No prose yet — this decides ordering, dedup, and caps.
+ * cluster members. No prose yet — this decides ordering, dedup, caps, AND the
+ * per-section voice directives (from `style.ts`) that downstream prose obeys.
  */
 export function planAssembly(
   _entry: Top10Entry,
   _clusterMembers: readonly AggregatedItem[],
+  _voice: VoiceStyle = VOICE_STYLE,
 ): AssemblyPlan {
-  throw new Error('not implemented: dedup + rank cluster members into weave order');
+  throw new Error('not implemented: dedup + rank cluster members into weave order, attach voice directives');
 }
 
 /**
  * Convert generated section prose into the in-app `ArticleBlock[]` render model
- * (headings, paragraphs, lists, an optional attributed quote, callouts).
+ * (headings, paragraphs, lists, an optional attributed quote, callouts). The
+ * prose is expected to already be on-voice; `lintVoice` (style.ts) is applied
+ * here as a final pass, downgrading off-voice phrasing to plainer wording
+ * (never blocking — accuracy/copyright gates run separately).
  */
 export function toRenderBlocks(
   _plan: AssemblyPlan,
   _sectionProse: Record<SectionId, string>,
 ): ArticleBlock[] {
-  throw new Error('not implemented: prose -> ArticleBlock[]');
+  throw new Error('not implemented: prose -> ArticleBlock[] (with voice lint pass)');
 }
 
 /**

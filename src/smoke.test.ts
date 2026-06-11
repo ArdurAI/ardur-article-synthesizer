@@ -6,6 +6,7 @@ import { MAX_QUOTE_WORDS, MAX_VERBATIM_NGRAM } from './copyright.ts';
 import { SECTION_PLAN, MIN_BODY_WORDS, MAX_REFERENCES } from './assemble.ts';
 import { RENDER_CONTRACT, RENDERABLE_BLOCK_TYPES } from './render.ts';
 import { isForbiddenKey } from './privacy.ts';
+import { VOICE_STYLE, SECTION_VOICE } from './style.ts';
 
 test('schema version is pinned', () => {
   assert.equal(SCHEMA_VERSION, 'ardur-content-pipeline/v1');
@@ -43,6 +44,21 @@ test('privacy guard flags known PII fragments and passes safe keys', () => {
   assert.ok(isForbiddenKey('sessionToken'));
   assert.ok(!isForbiddenKey('shares7d'));
   assert.ok(FORBIDDEN_METRIC_KEY_FRAGMENTS.includes('referrer'));
+});
+
+test('voice config is the single source of truth and is internally consistent', () => {
+  assert.equal(VOICE_STYLE.id, 'ardur-voice/genz-professional/v1');
+  assert.ok(VOICE_STYLE.do.length >= 5 && VOICE_STYLE.dont.length >= 4);
+  assert.ok(VOICE_STYLE.maxPlayfulnessRatio > 0 && VOICE_STYLE.maxPlayfulnessRatio <= 0.5);
+  // Personality is deliberately measured, never maxed.
+  assert.ok(VOICE_STYLE.tone.personality < 1 && VOICE_STYLE.tone.plainLanguage >= 0.8);
+  // Hype/clickbait is explicitly banned.
+  assert.ok(VOICE_STYLE.bannedLexicon.includes('game-changer'));
+  // Every assembly section has a voice intent.
+  const sections = new Set(SECTION_VOICE.map((s) => s.section));
+  for (const id of ['key-takeaway', 'why-this-matters', 'what-happened', 'builder-view', 'open-questions', 'ardur-take']) {
+    assert.ok(sections.has(id), `missing section voice: ${id}`);
+  }
 });
 
 test('runSynthesis is wired but not yet implemented', async () => {
