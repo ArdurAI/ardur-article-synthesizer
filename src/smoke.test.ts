@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { SCHEMA_VERSION, CYCLE_INTERVAL_MS, FORBIDDEN_METRIC_KEY_FRAGMENTS } from './contracts.ts';
+import { SCHEMA_VERSION, CONTRACT_REVISION, CYCLE_INTERVAL_MS, FORBIDDEN_METRIC_KEY_FRAGMENTS, assertCompatibleArtifact, SchemaVersionError } from './contracts.ts';
 import { runSynthesis } from './index.ts';
 import { MAX_QUOTE_WORDS, MAX_VERBATIM_NGRAM, enforceCopyright, isQuoteWithinLimit, longestVerbatimRun } from './copyright.ts';
 import { SECTION_PLAN, MIN_BODY_WORDS, MAX_REFERENCES, planAssembly, toRenderBlocks, assembleArticle } from './assemble.ts';
@@ -690,4 +690,106 @@ test('runSynthesis still produces articles when cluster has no members (degraded
   // Articles should still be produced (degraded to entry.references)
   assert.ok(Array.isArray(artifact.data.articles));
   assert.ok(artifact.warnings.some((w) => w.includes('No cluster members')), 'should warn about missing members');
+});
+
+// ---------------------------------------------------------------------------
+// @ardurai/contracts integration: assertCompatibleArtifact gate (#12)
+// ---------------------------------------------------------------------------
+
+test('CONTRACT_REVISION is at least 2 (claims additive axis ratified)', () => {
+  assert.ok(CONTRACT_REVISION >= 2, `expected CONTRACT_REVISION >= 2, got ${CONTRACT_REVISION}`);
+});
+
+test('assertCompatibleArtifact passes for a valid top10 fixture', () => {
+  const { envelope, warnings } = assertCompatibleArtifact(makeTop10(), 'top10');
+  assert.equal(envelope.schemaVersion, SCHEMA_VERSION);
+  assert.equal(envelope.artifact, 'top10');
+  assert.deepEqual(warnings, []);
+});
+
+test('assertCompatibleArtifact passes for a valid aggregation fixture', () => {
+  const { envelope, warnings } = assertCompatibleArtifact(makeAggregation(), 'aggregation');
+  assert.equal(envelope.schemaVersion, SCHEMA_VERSION);
+  assert.equal(envelope.artifact, 'aggregation');
+  assert.deepEqual(warnings, []);
+});
+
+test('assertCompatibleArtifact throws SchemaVersionError on wrong schema version', () => {
+  const bad = { ...makeTop10(), schemaVersion: 'ardur-content-pipeline/v0' };
+  assert.throws(
+    () => assertCompatibleArtifact(bad, 'top10'),
+    (err: unknown) => err instanceof SchemaVersionError && err.detail.stage === 'top10',
+  );
+});
+
+test('assertCompatibleArtifact throws SchemaVersionError on wrong artifact stage', () => {
+  const bad = { ...makeTop10(), artifact: 'ranking' };
+  assert.throws(
+    () => assertCompatibleArtifact(bad, 'top10'),
+    (err: unknown) => err instanceof SchemaVersionError,
+  );
+});
+
+test('assertCompatibleArtifact warns (not throws) on forward contractRevision', () => {
+  const forward = { ...makeTop10(), contractRevision: CONTRACT_REVISION + 1 };
+  const { warnings } = assertCompatibleArtifact(forward, 'top10');
+  assert.ok(warnings.length > 0, 'should warn on forward revision');
+  assert.ok(warnings[0]?.includes('forward-compatible'), 'warning should mention forward-compatible');
+});
+
+test('synthesizeCycle throws SchemaVersionError when top10 has wrong schemaVersion', async () => {
+  const badTop10 = { ...makeTop10(), schemaVersion: 'wrong-version' };
+  await assert.rejects(
+    () => runSynthesis({
+      top10: badTop10 as unknown as ReturnType<typeof makeTop10>,
+      aggregation: makeAggregation(),
+      provider: createProvider({ provider: 'deterministic' }),
+      now: NOW,
+    }),
+    (err: unknown) => err instanceof SchemaVersionError,
+  );
+});
+
+test('output artifact is stamped with contractRevision', async () => {
+  const artifact = await runSynthesis({
+    top10: makeTop10(),
+    aggregation: makeAggregation(),
+    provider: createProvider({ provider: 'deterministic' }),
+    now: NOW,
+  });
+  assert.equal(artifact.contractRevision, CONTRACT_REVISION);
+});
+
+test('item claims[] are merged into synthesized article tags', async () => {
+  const itemWithClaims = makeItem({ claims: ['PyTorch', 'compile-time optimization', 'deep learning'] });
+  const aggWithClaims = makeAggregation();
+  aggWithClaims.data.itemsByTopic['ai-models'] = [
+    itemWithClaims,
+    makeItem({ id: 'item-2', sourceDomain: 'techcrunch.com', claims: ['TechCrunch', 'AI benchmark'] }),
+  ];
+
+  const artifact = await runSynthesis({
+    top10: makeTop10(),
+    aggregation: aggWithClaims,
+    provider: createProvider({ provider: 'deterministic' }),
+    now: NOW,
+  });
+
+  const article = artifact.data.articles[0];
+  assert.ok(article, 'article must exist');
+  assert.ok(article.tags.includes('PyTorch'), 'tags should include item claim "PyTorch"');
+  assert.ok(article.tags.includes('compile-time optimization'), 'tags should include item claim');
+});
+
+test('item claims[] are absent from tags when items have no claims (rev-1 aggregator)', async () => {
+  const artifact = await runSynthesis({
+    top10: makeTop10(),
+    aggregation: makeAggregation(),
+    provider: createProvider({ provider: 'deterministic' }),
+    now: NOW,
+  });
+  const article = artifact.data.articles[0];
+  assert.ok(article, 'article must exist');
+  // makeAggregation() items have no claims — tags come from the draft only
+  assert.ok(article.tags.length >= 1, 'should still have at least one tag from deterministic draft');
 });

@@ -13,6 +13,7 @@
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { runSynthesis } from './index.ts';
+import { assertCompatibleArtifact, SchemaVersionError } from './contracts.ts';
 import type { Top10Artifact, AggregationArtifact } from './contracts.ts';
 
 interface ParsedArgs {
@@ -47,8 +48,9 @@ async function main(): Promise<void> {
   let top10: Top10Artifact;
   let aggregation: AggregationArtifact;
 
+  let rawTop10: unknown;
   try {
-    top10 = JSON.parse(readFileSync(args.top10, 'utf8')) as Top10Artifact;
+    rawTop10 = JSON.parse(readFileSync(args.top10, 'utf8'));
   } catch (err) {
     console.error(`Failed to read top10 from ${args.top10}:`, err);
     process.exitCode = 1;
@@ -56,11 +58,38 @@ async function main(): Promise<void> {
   }
 
   try {
-    aggregation = JSON.parse(readFileSync(args.aggregation, 'utf8')) as AggregationArtifact;
+    const { envelope, warnings: gateWarnings } = assertCompatibleArtifact(rawTop10, 'top10');
+    for (const w of gateWarnings) console.error(`[warn] top10 gate: ${w}`);
+    top10 = envelope as Top10Artifact;
+  } catch (err) {
+    if (err instanceof SchemaVersionError) {
+      console.error(`top10 schema gate failed: ${err.message}`);
+      process.exitCode = 1;
+      return;
+    }
+    throw err;
+  }
+
+  let rawAggregation: unknown;
+  try {
+    rawAggregation = JSON.parse(readFileSync(args.aggregation, 'utf8'));
   } catch (err) {
     console.error(`Failed to read aggregation from ${args.aggregation}:`, err);
     process.exitCode = 1;
     return;
+  }
+
+  try {
+    const { envelope, warnings: gateWarnings } = assertCompatibleArtifact(rawAggregation, 'aggregation');
+    for (const w of gateWarnings) console.error(`[warn] aggregation gate: ${w}`);
+    aggregation = envelope as AggregationArtifact;
+  } catch (err) {
+    if (err instanceof SchemaVersionError) {
+      console.error(`aggregation schema gate failed: ${err.message}`);
+      process.exitCode = 1;
+      return;
+    }
+    throw err;
   }
 
   const artifact = await runSynthesis({ top10, aggregation });

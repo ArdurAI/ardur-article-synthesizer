@@ -24,7 +24,7 @@ import type {
   AggregatedItem,
   SourceRef,
 } from './contracts.ts';
-import { SCHEMA_VERSION } from './contracts.ts';
+import { SCHEMA_VERSION, CONTRACT_REVISION, assertCompatibleArtifact } from './contracts.ts';
 import type { AiProvider } from './provider.ts';
 import { buildDeterministicDraft } from './provider.ts';
 import { planAssembly, toRenderBlocks, assembleArticle } from './assemble.ts';
@@ -132,6 +132,10 @@ export async function synthesizeOne(
   const effectiveMembers: AggregatedItem[] =
     clusterMembers.length > 0 ? clusterMembers : entryReferencesToItems(entry);
 
+  // Collect unique entity/topic labels from item claims (AggregatedItem.claims, rev-2 additive field).
+  // Used to enrich the synthesized article's tags; absent when items were produced by rev-1 aggregator.
+  const itemClaims = [...new Set(effectiveMembers.flatMap((m) => m.claims ?? []))];
+
   // Step 2: Build the assembly plan
   const plan = planAssembly(entry, effectiveMembers);
 
@@ -195,10 +199,16 @@ export async function synthesizeOne(
       ctx.top10.runId,
       now,
     );
-    return tryFinalGates(degradedArticle, effectiveMembers, entry.rank, warnings);
+    return tryFinalGates(withItemClaims(degradedArticle, itemClaims), effectiveMembers, entry.rank, warnings);
   }
 
-  return tryFinalGates(article, effectiveMembers, entry.rank, warnings);
+  return tryFinalGates(withItemClaims(article, itemClaims), effectiveMembers, entry.rank, warnings);
+}
+
+/** Merge item-level claims into an article's tags (additive, deduped). */
+function withItemClaims(article: SynthesizedArticle, itemClaims: string[]): SynthesizedArticle {
+  if (itemClaims.length === 0) return article;
+  return { ...article, tags: [...new Set([...article.tags, ...itemClaims])] };
 }
 
 /** Run copyright + render gates; on failure, degrade or drop. */
@@ -235,8 +245,16 @@ async function tryFinalGates(
 export async function synthesizeCycle(ctx: SynthesizeContext): Promise<ArticleArtifact> {
   const { top10, aggregation, now } = ctx;
 
+  // Gate before stamp (boundary 2 — protects direct API callers who bypass the CLI gate).
+  // Throws SchemaVersionError on version/stage mismatch; caller propagates the fault.
+  const gateWarnings: string[] = [];
+  const { warnings: w1 } = assertCompatibleArtifact(top10 as unknown, 'top10');
+  gateWarnings.push(...w1);
+  const { warnings: w2 } = assertCompatibleArtifact(aggregation as unknown, 'aggregation');
+  gateWarnings.push(...w2);
+
   // Validate that inputs share the same cycle
-  const cycleWarnings: string[] = [];
+  const cycleWarnings: string[] = [...gateWarnings];
   if (top10.cycle.id !== aggregation.cycle.id) {
     cycleWarnings.push(
       `Cycle id mismatch: top10=${top10.cycle.id} aggregation=${aggregation.cycle.id} — weaving from Top-10 references only`,
@@ -290,6 +308,7 @@ export async function synthesizeCycle(ctx: SynthesizeContext): Promise<ArticleAr
 
   return {
     schemaVersion: SCHEMA_VERSION,
+    contractRevision: CONTRACT_REVISION,
     artifact: 'articles',
     runId: `synth-${top10.runId}-${now.toISOString()}`,
     upstreamRunId: top10.runId,
