@@ -1,56 +1,188 @@
 /**
  * Provenance — every generated claim is traceable to the sources that support it.
  *
- * The shared `SynthesizedArticle.provenance` (in contracts.ts) is article-level:
- * clusterId, sourceCount, distinctDomains, upstreamRunId. That stays the wire
- * format. This module adds the FINER-GRAINED, per-claim model the synthesizer
- * uses internally to *prove* each sentence is grounded before it is allowed into
- * the body.
+ * Two gate modes:
  *
- * Per-claim provenance is surfaced on the wire in two ratified ways today:
- *   1. Quote blocks carry `attribution { source, url }` (contracts.ts).
- *   2. The article-level `provenance` aggregates source coverage.
- * A richer `claims?: ClaimProvenance[]` on `SynthesizedArticle` is a PROPOSED
- * ADDITIVE field (see docs/spec.md §"Provenance"): additive => no schema bump,
- * but it must be ratified in lockstep across all four repos before contracts.ts
- * changes. Until then this type lives only in the synthesizer.
+ * 1. FACT-GROUNDED (Rev 3, S3) — primary mode when ExtractedFact[] are available.
+ *    Claim sentences are mapped to fact IDs via:
+ *      a) Inline [FACT:id] citations the LLM embedded in its output.
+ *      b) Entity/number overlap as a backstop against bad citations.
+ *    Returns ClaimProvenance[] (contracts Rev 3) for the article wire format.
+ *
+ * 2. TITLE-TOKEN (Rev 2, legacy) — fallback when no facts are available (rev-2
+ *    aggregator). Matches claim tokens against source title + domain vocabulary.
+ *    Preserved exactly from the prior implementation.
+ *
+ * The gate is fail-closed: articles with ≥1 ungrounded factual sentence are
+ * either re-asked (one bounded attempt) or HELD — never published flat.
  */
 
-import type { SourceRef } from './contracts.ts';
+import type { SourceRef, ExtractedFact, ClaimProvenance, Confidence } from './contracts.ts';
 
-/** How strongly the cited sources back a claim. */
-export type SupportStrength = 'corroborated' | 'single-source' | 'inferred';
+// ---------------------------------------------------------------------------
+// Internal claim shape (used by both gate modes)
+// ---------------------------------------------------------------------------
 
-/** One atomic, checkable assertion made in the article body. */
-export interface ClaimProvenance {
-  /** Stable id, e.g. `${articleId}#c03`. */
-  id: string;
-  /** The claim text as it appears (or is paraphrased) in the body. */
-  claim: string;
-  /** Which render block (by index) the claim was emitted into. */
+export interface ClaimInput {
+  text: string;
   blockIndex: number;
-  /** Source ids (SourceRef-derived) that support this exact claim. */
-  supportingSourceIds: string[];
-  strength: SupportStrength;
-  /** True if the claim is the synthesizer's own framing, not a sourced fact. */
   isEditorial: boolean;
 }
 
-/** Article-wide provenance roll-up, keyed by claim id. */
-export interface ProvenanceMap {
+// ---------------------------------------------------------------------------
+// Gate mode 1: Fact-grounded (Rev 3)
+// ---------------------------------------------------------------------------
+
+export interface FactProvenanceResult {
   claims: ClaimProvenance[];
-  /** Distinct sources actually cited by at least one claim. */
+  ungroundedClaims: ClaimInput[];
+  isGrounded: boolean;
+}
+
+/**
+ * Extract inline [FACT:id] citations from a claim sentence.
+ * Returns the set of fact IDs cited.
+ */
+function extractInlineCitations(text: string): Set<string> {
+  const ids = new Set<string>();
+  for (const match of text.matchAll(/\[FACT:([^\]]+)\]/g)) {
+    const id = match[1]?.trim();
+    if (id) ids.add(id);
+  }
+  return ids;
+}
+
+/** Meaningful content tokens (stop words removed, min length 3). */
+const STOP_WORDS_FACT = new Set([
+  'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+  'to', 'of', 'and', 'in', 'for', 'on', 'with', 'that', 'this', 'from',
+  'it', 'its', 'at', 'by', 'or', 'but', 'as', 'has', 'have', 'had',
+  'not', 'all', 'will', 'can', 'may', 'could', 'would', 'should',
+]);
+
+function contentTokensFact(text: string): Set<string> {
+  return new Set(
+    text
+      .toLowerCase()
+      .replace(/\[FACT:[^\]]+\]/g, ' ') // strip citations before tokenizing
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length >= 3 && !STOP_WORDS_FACT.has(w)),
+  );
+}
+
+/**
+ * Build fact-grounded provenance. Primary gate mode (S3).
+ *
+ * For each factual claim sentence:
+ *   1. Collect [FACT:id] inline citations.
+ *   2. Validate each cited ID exists in the provided facts.
+ *   3. Backstop: if no valid inline citations, check entity/number overlap.
+ *   4. Claims with zero supporting facts are ungrounded.
+ */
+export function buildProvenanceFromFacts(
+  articleId: string,
+  claims: readonly ClaimInput[],
+  facts: readonly ExtractedFact[],
+): FactProvenanceResult {
+  const factById = new Map(facts.map((f) => [f.id, f]));
+  const resultClaims: ClaimProvenance[] = [];
+  const ungroundedClaims: ClaimInput[] = [];
+
+  for (const claim of claims) {
+    if (claim.isEditorial) {
+      resultClaims.push({
+        blockIndex: claim.blockIndex,
+        text: claim.text,
+        isEditorial: true,
+        factIds: [],
+        corroboration: 0,
+        confidence: 'high',
+      });
+      continue;
+    }
+
+    // Step 1: inline citations
+    const citedIds = extractInlineCitations(claim.text);
+    const validIds = [...citedIds].filter((id) => factById.has(id));
+
+    let supportingFactIds = validIds;
+
+    // Step 2: backstop overlap when no valid inline citations
+    if (supportingFactIds.length === 0 && facts.length > 0) {
+      const claimTokens = contentTokensFact(claim.text);
+      const threshold = Math.max(2, Math.ceil(claimTokens.size * 0.25));
+      for (const fact of facts) {
+        const factTokens = contentTokensFact(
+          `${fact.statement} ${fact.entities.join(' ')} ${fact.quantity?.metric ?? ''}`,
+        );
+        const matchCount = [...factTokens].filter((t) => claimTokens.has(t)).length;
+        if (matchCount >= threshold) {
+          supportingFactIds.push(fact.id);
+        }
+      }
+    }
+
+    if (supportingFactIds.length === 0) {
+      ungroundedClaims.push(claim);
+    }
+
+    // Compute corroboration from the supporting facts
+    const corrobDomains = new Set<string>();
+    for (const id of supportingFactIds) {
+      const fact = factById.get(id);
+      if (fact) {
+        for (const p of fact.provenance) corrobDomains.add(p.sourceDomain);
+      }
+    }
+
+    const confidence: Confidence = supportingFactIds.length === 0
+      ? 'low'
+      : corrobDomains.size >= 2 ? 'high' : 'medium';
+
+    resultClaims.push({
+      blockIndex: claim.blockIndex,
+      text: claim.text,
+      isEditorial: false,
+      factIds: supportingFactIds,
+      corroboration: corrobDomains.size,
+      confidence,
+    });
+  }
+
+  const isGrounded = ungroundedClaims.length === 0;
+  return { claims: resultClaims, ungroundedClaims, isGrounded };
+}
+
+// ---------------------------------------------------------------------------
+// Gate mode 2: Title-token (Rev 2 legacy fallback)
+// ---------------------------------------------------------------------------
+
+/** How strongly the cited sources back a claim (legacy mode). */
+export type SupportStrength = 'corroborated' | 'single-source' | 'inferred';
+
+/** One atomic, checkable assertion (legacy internal format). */
+export interface LegacyClaimProvenance {
+  id: string;
+  claim: string;
+  blockIndex: number;
+  supportingSourceIds: string[];
+  strength: SupportStrength;
+  isEditorial: boolean;
+}
+
+/** Article-wide provenance roll-up (legacy mode), keyed by claim id. */
+export interface ProvenanceMap {
+  claims: LegacyClaimProvenance[];
   citedSources: SourceRef[];
-  /** Claims with zero supporting sources and `isEditorial=false` — must be 0. */
   unsupportedClaimCount: number;
 }
 
-/** Derive a stable id for a SourceRef (not in contracts.ts). */
+/** Derive a stable id for a SourceRef. */
 function sourceRefId(ref: SourceRef): string {
   return `${ref.sourceDomain}::${encodeURIComponent(ref.title)}`;
 }
 
-/** Meaningful content tokens — stop words removed, min length 3. */
 const STOP_WORDS = new Set([
   'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
   'to', 'of', 'and', 'in', 'for', 'on', 'with', 'that', 'this', 'from',
@@ -67,9 +199,8 @@ function contentTokens(text: string): string[] {
 }
 
 /**
- * Build the provenance map for a drafted article. Aligns each claim to cluster
- * sources by entity/title token overlap; any factual (non-editorial) claim with
- * no supporting source is counted as unsupported (must be 0 to pass the gate).
+ * Legacy title-token provenance gate. Used when no ExtractedFacts are available
+ * (rev-2 aggregator). Matches claim token vocabulary against source titles.
  */
 export function buildProvenance(
   articleId: string,
@@ -77,7 +208,7 @@ export function buildProvenance(
   sources: readonly SourceRef[],
 ): ProvenanceMap {
   const citedSourceIdSet = new Set<string>();
-  const resultClaims: ClaimProvenance[] = [];
+  const resultClaims: LegacyClaimProvenance[] = [];
 
   for (let i = 0; i < claims.length; i++) {
     const claim = claims[i];
@@ -86,11 +217,6 @@ export function buildProvenance(
 
     if (!claim.isEditorial) {
       const claimTokens = new Set(contentTokens(claim.text));
-      // Require at least 25% of the claim's distinct content tokens to match the
-      // source's tokens (floor: 2). Counting *distinct* matching tokens prevents
-      // a repeated source-name token from satisfying the threshold by itself.
-      // This stops on-topic hallucinations that share only topic-level vocabulary
-      // (e.g. "pytorch", "compile") from being auto-grounded.
       const threshold = Math.max(2, Math.ceil(claimTokens.size * 0.25));
 
       for (const source of sources) {
@@ -137,7 +263,7 @@ export function buildProvenance(
   };
 }
 
-/** True iff every factual claim has >= 1 supporting source. */
+/** True iff every factual claim has >= 1 supporting source (legacy gate). */
 export function isFullyGrounded(map: ProvenanceMap): boolean {
   return map.unsupportedClaimCount === 0;
 }

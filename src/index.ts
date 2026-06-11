@@ -19,10 +19,17 @@ import type { AiProvider } from './provider.ts';
 
 export * from './contracts.ts';
 export type { AiProvider, ProviderName, GenerateRequest, GenerateResult } from './provider.ts';
-export type { ClaimProvenance, ProvenanceMap } from './provenance.ts';
+export type {
+  ClaimInput,
+  LegacyClaimProvenance,
+  ProvenanceMap,
+  FactProvenanceResult,
+  SupportStrength,
+} from './provenance.ts';
 export type { CopyrightVerdict, CopyrightViolation } from './copyright.ts';
-export type { RenderContract, RenderViolation } from './render.ts';
+export type { RenderContract, RenderViolation, RenderViolationKind } from './render.ts';
 export type { AssemblyPlan, SectionSpec } from './assemble.ts';
+export { buildChartBlocks } from './assemble.ts';
 
 export interface SynthesisOptions {
   /**

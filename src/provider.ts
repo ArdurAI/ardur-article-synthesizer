@@ -23,7 +23,7 @@
  * budget=0 article reads on-voice — not as dry newswire.
  */
 
-import type { ProviderMeta, Confidence, SourceRef, SourceTier } from './contracts.ts';
+import type { ProviderMeta, Confidence, SourceRef, SourceTier, ExtractedFact } from './contracts.ts';
 import { VOICE_STYLE } from './style.ts';
 
 export type ProviderName = 'deterministic' | 'ollama' | 'openai';
@@ -36,14 +36,25 @@ export interface GenerateRequest {
   headline: string;
   /** Copyright-safe references: title + source + link + date. NO body text. */
   references: SourceRef[];
-  /** Deterministic draft used as the fallback AND as grounding for the model. */
+  /**
+   * S1/S3 — Rev 3: structured facts extracted from source bodies.
+   * When present, these are the PRIMARY synthesis input; the LLM writes the
+   * article FROM the facts, citing `[FACT:id]` inline. When absent (rev-2
+   * aggregator), the model falls back to reference-metadata-only synthesis.
+   */
+  facts?: ExtractedFact[];
+  /** Deterministic draft used as grounding context in the prompt (never published). */
   fallback: ArticleDraft;
   /**
    * The Ardur house-voice directive (from `style.ts:buildVoiceDirective`),
-   * threaded verbatim into the model prompt. The SAME directive parameterizes
-   * the deterministic fallback templates, so budget=0 output reads on-voice too.
+   * threaded verbatim into the model prompt.
    */
   voiceDirective: string;
+  /**
+   * S3 — When set, the model is asked to re-ground or drop these specific
+   * ungrounded claim sentences (one bounded re-ask before HOLD).
+   */
+  reaskClaims?: string[];
 }
 
 /** The structured draft a provider returns. Validated against ARTICLE_SCHEMA. */
@@ -491,7 +502,19 @@ class OpenAiProvider implements AiProvider {
       return { draft: request.fallback, meta: { ...fallbackMeta, reason: 'budget exhausted' } };
     }
 
-    const systemPrompt = `You are the Ardur article synthesizer. Write one original article draft as JSON in the Ardur house voice.\n\n${request.voiceDirective}\n\nRULES:\n- Original prose only — never copy or paraphrase source text\n- Metadata (titles, sources, dates) only — no article bodies are provided\n- Output strict JSON matching the schema: {headline, dek, sections:{key-takeaway,why-this-matters,what-happened,builder-view,open-questions,ardur-take}, keyPoints:string[], whyItMatters, readerAction, confidence:"high"|"medium"|"low", tags:string[]}`;
+    const hasFacts = (request.facts?.length ?? 0) > 0;
+    const systemPrompt = [
+      `You are the Ardur article synthesizer. Write one original article draft as JSON in the Ardur house voice.`,
+      ``,
+      request.voiceDirective,
+      ``,
+      `RULES:`,
+      `- Original prose only — never copy or paraphrase source sentences.`,
+      ...(hasFacts
+        ? [`- Write FROM the provided ExtractedFacts; cite every factual sentence with [FACT:id].`]
+        : [`- Metadata (titles, sources, dates) only — no article bodies are provided.`]),
+      `- Output strict JSON: {headline, dek, sections:{key-takeaway,why-this-matters,what-happened,builder-view,open-questions,ardur-take}, keyPoints:string[], whyItMatters, readerAction, confidence:"high"|"medium"|"low", tags:string[]}`,
+    ].join('\\n');
 
     const userPrompt = buildUserPrompt(request);
     const controller = new AbortController();
@@ -553,10 +576,35 @@ class OpenAiProvider implements AiProvider {
 // Shared prompt builders
 // ---------------------------------------------------------------------------
 
+function buildFactLines(facts: ExtractedFact[], max = 20): string[] {
+  if (facts.length === 0) return [];
+  const lines = [`EXTRACTED FACTS (PRIMARY SOURCE — write FROM these, cite [FACT:id] inline):`];
+  for (const f of facts.slice(0, max)) {
+    const qty = f.quantity
+      ? ` [${f.quantity.metric}: ${f.quantity.value}${f.quantity.unit ? ' ' + f.quantity.unit : ''}${f.quantity.asOf ? ' as of ' + f.quantity.asOf : ''}]`
+      : '';
+    const corr = f.corroboration >= 2 ? ` (corroborated: ${f.corroboration} sources)` : ` (single-source)`;
+    lines.push(`[FACT:${f.id}] ${f.statement}${qty}${corr}`);
+  }
+  return lines;
+}
+
 function buildOllamaPrompt(request: GenerateRequest): string {
   const refLines = request.references.slice(0, 10).map((r, i) =>
     `${i + 1}. [${r.tier}] "${r.title}" — ${r.source} (${r.publishedAt.slice(0, 10)}) ${r.url}`,
   );
+  const factLines = buildFactLines(request.facts ?? []);
+  const reaskSection = request.reaskClaims && request.reaskClaims.length > 0
+    ? [
+        '',
+        'REGROUND OR DROP — these sentences have no [FACT:id] citation. For each:',
+        '  a) Add a [FACT:id] citation if a provided fact supports it.',
+        '  b) Remove the sentence entirely if it cannot be grounded.',
+        ...request.reaskClaims.map((c, i) => `  ${i + 1}. "${c}"`),
+      ]
+    : [];
+
+  const hasFacts = factLines.length > 0;
   return [
     `Write one original Ardur article as JSON.`,
     '',
@@ -566,12 +614,16 @@ function buildOllamaPrompt(request: GenerateRequest): string {
     `TOPIC: ${request.topicLabel}`,
     `HEADLINE HINT: ${request.headline}`,
     '',
-    `SOURCES (metadata only — write ORIGINAL prose, do NOT copy):`,
-    ...refLines,
+    ...(hasFacts ? factLines : [`SOURCES (metadata only — write ORIGINAL prose, do NOT copy):`, ...refLines]),
+    ...(hasFacts ? ['', 'ATTRIBUTION SOURCES (for reference links only):', ...refLines] : []),
+    ...reaskSection,
     '',
-    `OUTPUT JSON: {"headline":"...","dek":"...","sections":{"key-takeaway":"...","why-this-matters":"...","what-happened":"...","builder-view":"...","open-questions":"...","ardur-take":"..."},"keyPoints":["..."],"whyItMatters":"...","readerAction":"...","confidence":"high|medium|low","tags":["..."]}`,
+    `RULES:`,
+    `- Write original prose ONLY — never copy or paraphrase source sentences.`,
+    ...(hasFacts ? [`- Every factual sentence MUST cite ≥1 [FACT:id] inline.`, `- Single-source facts are allowed but will be tagged confidence:low.`] : []),
+    `- Output strict JSON: {"headline":"...","dek":"...","sections":{"key-takeaway":"...","why-this-matters":"...","what-happened":"...","builder-view":"...","open-questions":"...","ardur-take":"..."},"keyPoints":["..."],"whyItMatters":"...","readerAction":"...","confidence":"high|medium|low","tags":["..."]}`,
     '',
-    `Fallback (use as a grounding reference, not a template to copy):`,
+    `Context draft (structure reference — do NOT copy text):`,
     JSON.stringify(request.fallback, null, 2),
   ].join('\n');
 }
@@ -580,14 +632,24 @@ function buildUserPrompt(request: GenerateRequest): string {
   const refLines = request.references.slice(0, 15).map((r, i) =>
     `${i + 1}. [${r.tier}] "${r.title}" (${r.source}, ${r.publishedAt.slice(0, 10)})`,
   );
+  const factLines = buildFactLines(request.facts ?? [], 20);
+  const hasFacts = factLines.length > 0;
+  const reaskSection = request.reaskClaims && request.reaskClaims.length > 0
+    ? [
+        '',
+        'REGROUND OR DROP:',
+        ...request.reaskClaims.map((c, i) => `  ${i + 1}. "${c}"`),
+      ]
+    : [];
   return [
     `TOPIC: ${request.topicLabel}`,
     `HEADLINE HINT: ${request.headline}`,
     '',
-    `SOURCES (${request.references.length} total, showing ${refLines.length}):`,
-    ...refLines,
+    ...(hasFacts ? factLines : [`SOURCES (${request.references.length} total):`, ...refLines]),
+    ...(hasFacts ? ['', `ATTRIBUTION SOURCES:`, ...refLines] : []),
+    ...reaskSection,
     '',
-    `Write an original Ardur article in the voice described. Output valid JSON.`,
+    `Write an original Ardur article${hasFacts ? ', grounding every factual sentence with [FACT:id] citations' : ''}. Output valid JSON.`,
   ].join('\n');
 }
 

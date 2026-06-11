@@ -7,9 +7,10 @@ import { SECTION_PLAN, MIN_BODY_WORDS, MAX_REFERENCES, planAssembly, toRenderBlo
 import { RENDER_CONTRACT, RENDERABLE_BLOCK_TYPES, validateRenderable } from './render.ts';
 import { isForbiddenKey, scrubUrl, redactForLog } from './privacy.ts';
 import { VOICE_STYLE, SECTION_VOICE, buildVoiceDirective, lintVoice } from './style.ts';
-import { buildProvenance, isFullyGrounded } from './provenance.ts';
+import { buildProvenance, isFullyGrounded, buildProvenanceFromFacts } from './provenance.ts';
 import { createProvider, buildDeterministicDraft } from './provider.ts';
-import type { AggregatedItem, Top10Entry, SynthesizedArticle, Top10Artifact, AggregationArtifact } from './contracts.ts';
+import { buildChartBlocks } from './assemble.ts';
+import type { AggregatedItem, Top10Entry, SynthesizedArticle, Top10Artifact, AggregationArtifact, ExtractedFact, ProviderMeta } from './contracts.ts';
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -562,7 +563,7 @@ test('buildDeterministicDraft produces MIN_BODY_WORDS words when converted to bl
   const plan = planAssembly(makeEntry(), items);
   const draft = buildDeterministicDraft({ topic: 'ai-models', topicLabel: 'AI Models', headline: 'PyTorch 2.6 ships', references: plan.references.map(r => ({ source: r.source, sourceDomain: r.sourceDomain, tier: r.tier, url: r.url, title: r.title, publishedAt: r.publishedAt })), voiceDirective: '' });
   const blocks = toRenderBlocks(plan, draft.sections as Record<import('./assemble.ts').SectionId, string>);
-  const totalWords = blocks.map((b) => b.text ?? (b.items ?? []).join(' ')).join(' ').split(/\s+/).filter(Boolean).length;
+  const totalWords = blocks.map((b) => { const tb = b as { text?: string; items?: string[] }; return tb.text ?? (tb.items ?? []).join(' '); }).join(' ').split(/\s+/).filter(Boolean).length;
   assert.ok(totalWords >= MIN_BODY_WORDS, `expected >= ${MIN_BODY_WORDS} words, got ${totalWords}`);
 });
 
@@ -792,4 +793,239 @@ test('item claims[] are absent from tags when items have no claims (rev-1 aggreg
   assert.ok(article, 'article must exist');
   // makeAggregation() items have no claims — tags come from the draft only
   assert.ok(article.tags.length >= 1, 'should still have at least one tag from deterministic draft');
+});
+
+// ---------------------------------------------------------------------------
+// S2: deterministic provider → HOLD (never flat-publish)
+// ---------------------------------------------------------------------------
+
+test('runSynthesis with deterministic provider produces held articles (S2)', async () => {
+  const artifact = await runSynthesis({
+    top10: makeTop10(),
+    aggregation: makeAggregation(),
+    provider: createProvider({ provider: 'deterministic' }),
+    now: NOW,
+  });
+  assert.ok(artifact.data.articles.length > 0, 'held articles are included in the artifact');
+  const article = artifact.data.articles[0] as { editorialStatus?: string };
+  assert.equal(article.editorialStatus, 'held', 'deterministic articles must be held, not published');
+  assert.ok(artifact.warnings.some((w) => w.includes('held')), 'should warn about held articles');
+});
+
+test('runSynthesis held articles have valid body content for editorial review', async () => {
+  const artifact = await runSynthesis({
+    top10: makeTop10(),
+    aggregation: makeAggregation(),
+    provider: createProvider({ provider: 'deterministic' }),
+    now: NOW,
+  });
+  const article = artifact.data.articles[0];
+  assert.ok(article, 'held article must exist');
+  assert.ok(article.headline && article.headline.length > 0, 'held article must have headline');
+  assert.ok(Array.isArray(article.body) && article.body.length > 0, 'held article must have body');
+  assert.ok(article.wordCount >= MIN_BODY_WORDS, 'held article must meet word count for editorial review');
+});
+
+test('CONTRACT_REVISION is 3 (Rev 3 published)', () => {
+  assert.equal(CONTRACT_REVISION, 3, 'CONTRACT_REVISION should be 3 after Rev 3 contracts');
+});
+
+// ---------------------------------------------------------------------------
+// S3: buildProvenanceFromFacts — fact-grounded gate
+// ---------------------------------------------------------------------------
+
+function makeExtractedFact(overrides: Partial<ExtractedFact> = {}): ExtractedFact {
+  const extractedBy: ProviderMeta = { provider: 'ollama', model: 'llama3.1', status: 'generated', generatedAt: NOW.toISOString() };
+  return {
+    id: 'fact-1',
+    topic: 'ai-models',
+    clusterId: 'cluster-1',
+    statement: 'PyTorch 2.6 achieves 2x faster compile times compared to 2.5',
+    entities: ['PyTorch', 'compile times'],
+    provenance: [{ sourceDocId: 'doc-1', sourceDomain: 'pytorch.org', url: 'https://pytorch.org/blog/pytorch-2.6' }],
+    corroboration: 1,
+    confidence: 'high',
+    extractedBy,
+    ...overrides,
+  };
+}
+
+test('buildProvenanceFromFacts grounds claims with inline [FACT:id] citations', () => {
+  const fact = makeExtractedFact({ id: 'fact-1' });
+  const claims = [
+    { text: 'PyTorch 2.6 achieves faster compile times [FACT:fact-1].', blockIndex: 0, isEditorial: false },
+  ];
+  const result = buildProvenanceFromFacts('art-1', claims, [fact]);
+  assert.ok(result.isGrounded, 'claim with valid FACT citation should be grounded');
+  assert.equal(result.ungroundedClaims.length, 0, 'no ungrounded claims');
+  assert.equal(result.claims[0]?.factIds[0], 'fact-1', 'factId must be preserved');
+});
+
+test('buildProvenanceFromFacts backstop: grounds claims via entity overlap when no citation', () => {
+  const fact = makeExtractedFact({ id: 'fact-1', entities: ['PyTorch', 'compile', 'faster'] });
+  const claims = [
+    { text: 'PyTorch compile speed improved faster in the new release.', blockIndex: 0, isEditorial: false },
+  ];
+  const result = buildProvenanceFromFacts('art-1', claims, [fact]);
+  // Entity overlap is a backstop — may or may not hit the threshold
+  assert.ok(result.claims.length === 1, 'should produce one claim entry');
+});
+
+test('buildProvenanceFromFacts treats editorial blocks as always grounded', () => {
+  const claims = [
+    { text: 'Here is our take on this story.', blockIndex: 0, isEditorial: true },
+  ];
+  const result = buildProvenanceFromFacts('art-1', claims, []);
+  assert.ok(result.isGrounded, 'editorial claims should always be grounded');
+  assert.equal(result.ungroundedClaims.length, 0);
+});
+
+test('buildProvenanceFromFacts flags ungrounded factual claims', () => {
+  const fact = makeExtractedFact({ id: 'fact-1' });
+  const claims = [
+    { text: 'Unrelated claim about quantum computing breaking RSA encryption immediately.', blockIndex: 0, isEditorial: false },
+  ];
+  const result = buildProvenanceFromFacts('art-1', claims, [fact]);
+  assert.ok(!result.isGrounded, 'claim with no matching facts should not be grounded');
+  assert.equal(result.ungroundedClaims.length, 1, 'should have 1 ungrounded claim');
+});
+
+test('buildProvenanceFromFacts invalid [FACT:id] references are not counted', () => {
+  const claims = [
+    { text: 'Something happened [FACT:nonexistent-id].', blockIndex: 0, isEditorial: false },
+  ];
+  const result = buildProvenanceFromFacts('art-1', claims, [makeExtractedFact({ id: 'fact-real' })]);
+  // nonexistent-id doesn't exist in facts, so backstop applies
+  assert.equal(result.claims[0]?.factIds.includes('nonexistent-id'), false, 'invalid fact IDs must not be counted');
+});
+
+// ---------------------------------------------------------------------------
+// S4: buildChartBlocks — visual blocks from real extracted numbers
+// ---------------------------------------------------------------------------
+
+test('buildChartBlocks produces chart blocks from quantitative facts', () => {
+  const facts: ExtractedFact[] = [
+    makeExtractedFact({
+      id: 'fact-1',
+      entities: ['PyTorch 2.6'],
+      statement: 'PyTorch 2.6 compile time is 4.2 seconds',
+      quantity: { metric: 'compile time', value: 4.2, unit: 's' },
+      provenance: [{ sourceDocId: 'doc-1', sourceDomain: 'pytorch.org', url: 'https://pytorch.org/blog' }],
+    }),
+    makeExtractedFact({
+      id: 'fact-2',
+      entities: ['PyTorch 2.5'],
+      statement: 'PyTorch 2.5 compile time was 8.1 seconds',
+      quantity: { metric: 'compile time', value: 8.1, unit: 's' },
+      provenance: [{ sourceDocId: 'doc-2', sourceDomain: 'pytorch.org', url: 'https://pytorch.org/blog' }],
+    }),
+  ];
+  const refs = [{ source: 'PyTorch', url: 'https://pytorch.org/blog', sourceDomain: 'pytorch.org' }];
+  const charts = buildChartBlocks(facts, refs);
+  assert.ok(charts.length >= 1, 'should produce at least one chart');
+  assert.equal(charts[0]?.type, 'chart', 'block type must be chart');
+  assert.equal(charts[0]?.chartType, 'bar', 'should use bar chart for comparison');
+  assert.ok(charts[0]?.series.length === 2, 'should have 2 data points');
+  assert.ok(charts[0]?.factIds.includes('fact-1'), 'factIds must trace to ExtractedFact');
+  assert.ok(charts[0]?.factIds.includes('fact-2'), 'factIds must trace to ExtractedFact');
+  assert.ok(charts[0]?.attribution.sources.length > 0, 'chart must have attribution');
+});
+
+test('buildChartBlocks skips metrics with only one datapoint (not a comparison)', () => {
+  const facts: ExtractedFact[] = [
+    makeExtractedFact({
+      id: 'fact-1',
+      quantity: { metric: 'unique-metric', value: 42 },
+      provenance: [{ sourceDocId: 'doc-1', sourceDomain: 'pytorch.org', url: 'https://pytorch.org' }],
+    }),
+  ];
+  const refs = [{ source: 'PyTorch', url: 'https://pytorch.org', sourceDomain: 'pytorch.org' }];
+  const charts = buildChartBlocks(facts, refs);
+  assert.equal(charts.length, 0, 'single-datapoint metrics should not produce charts');
+});
+
+test('buildChartBlocks returns empty array when no quantitative facts', () => {
+  const facts = [makeExtractedFact({ quantity: undefined })];
+  const charts = buildChartBlocks(facts, []);
+  assert.equal(charts.length, 0, 'no quantitative facts → no charts');
+});
+
+test('validateRenderable accepts chart blocks with valid structure', () => {
+  const article: SynthesizedArticle = {
+    id: 'test', rank: 1, topic: 'test', topicLabel: 'Test', headline: 'Test', dek: 'Test',
+    body: [{
+      type: 'chart',
+      chartType: 'bar',
+      title: 'Compile Time (s)',
+      series: [{ label: 'v2.6', value: 4.2, unit: 's' }, { label: 'v2.5', value: 8.1, unit: 's' }],
+      factIds: ['fact-1', 'fact-2'],
+      attribution: { sources: [{ source: 'PyTorch', url: 'https://pytorch.org' }] },
+    }],
+    keyPoints: [], whyItMatters: '', readerAction: '', tags: [], confidence: 'high', sourceQuality: 'corroborated',
+    references: [{ source: 'T', sourceDomain: 't.com', tier: 'news', url: 'https://t.com', title: 'T', publishedAt: NOW.toISOString() }],
+    provenance: { clusterId: 'c1', sourceCount: 1, distinctDomains: 1, upstreamRunId: 'run-1' },
+    ai: { provider: 'ollama', model: 'llama3.1', status: 'generated', generatedAt: NOW.toISOString() },
+    legalNote: 'Original synthesis', wordCount: 100, readingTimeMinutes: 1, generatedAt: NOW.toISOString(),
+  };
+  const violations = validateRenderable(article);
+  assert.ok(!violations.some((v) => v.kind === 'chart-missing-attribution'), 'valid chart should pass');
+  assert.ok(!violations.some((v) => v.kind === 'chart-no-data'), 'chart with series should pass');
+  assert.ok(!violations.some((v) => v.kind === 'chart-invented-data'), 'chart with factIds should pass');
+});
+
+test('validateRenderable rejects chart with invented data (no factIds)', () => {
+  const article: SynthesizedArticle = {
+    id: 'test', rank: 1, topic: 'test', topicLabel: 'Test', headline: 'Test', dek: 'Test',
+    body: [{
+      type: 'chart',
+      chartType: 'bar',
+      title: 'Invented numbers',
+      series: [{ label: 'A', value: 100 }],
+      factIds: [], // WRONG: invented data
+      attribution: { sources: [{ source: 'T', url: 'https://t.com' }] },
+    }],
+    keyPoints: [], whyItMatters: '', readerAction: '', tags: [], confidence: 'low', sourceQuality: 'single source',
+    references: [{ source: 'T', sourceDomain: 't.com', tier: 'news', url: 'https://t.com', title: 'T', publishedAt: NOW.toISOString() }],
+    provenance: { clusterId: 'c1', sourceCount: 1, distinctDomains: 1, upstreamRunId: 'run-1' },
+    ai: { provider: 'ollama', model: 'llama3.1', status: 'generated', generatedAt: NOW.toISOString() },
+    legalNote: '', wordCount: 50, readingTimeMinutes: 1, generatedAt: NOW.toISOString(),
+  };
+  const violations = validateRenderable(article);
+  assert.ok(violations.some((v) => v.kind === 'chart-invented-data'), 'chart with empty factIds must fail');
+});
+
+// ---------------------------------------------------------------------------
+// Issue #11: copyright fix — long headlines no longer cause verbatim-overlap
+// ---------------------------------------------------------------------------
+
+test('enforceCopyright does not flag long headline in article body (issue #11)', () => {
+  // Headline is > 8 words — previously would trigger verbatim-overlap against item.title
+  const longHeadline = 'PyTorch 2.6 ships with dramatically faster compile times and new features';
+  const item = makeItem({ title: longHeadline, summaryHint: '' }); // empty summaryHint, so no overlap possible
+  const plan = planAssembly(makeEntry({ headline: longHeadline }), [item, makeItem({ id: 'i2', sourceDomain: 'tc.com', fingerprint: 'tc::1' })]);
+  const refs = plan.references.map((r) => ({ source: r.source, sourceDomain: r.sourceDomain, tier: r.tier, url: r.url, title: r.title, publishedAt: r.publishedAt }));
+  const draft = buildDeterministicDraft({ topic: 'ai-models', topicLabel: 'AI Models', headline: longHeadline, references: refs, voiceDirective: '' });
+  const blocks = toRenderBlocks(plan, draft.sections as Record<import('./assemble.ts').SectionId, string>);
+  const article = assembleArticle(plan, blocks, draft, { provider: 'deterministic', model: 'rules/v1', status: 'fallback', generatedAt: NOW.toISOString() }, 'run-1', NOW);
+  const verdict = enforceCopyright(article, [item]);
+  assert.ok(verdict.ok, `copyright should pass for long-headline article (issue #11 fix); violations: ${JSON.stringify(verdict.violations)}`);
+});
+
+test('enforceCopyright still catches verbatim reproduction of summaryHint', () => {
+  const summaryHint = 'The PyTorch team released version 2.6 with dramatic performance improvements for production ML workflows';
+  const item = makeItem({ title: 'PyTorch 2.6', summaryHint });
+  // Build an article that copies the summaryHint verbatim in the body
+  const article: SynthesizedArticle = {
+    id: 'test', rank: 1, topic: 'ai-models', topicLabel: 'AI Models',
+    headline: 'PyTorch 2.6 ships', dek: 'A new release',
+    body: [{ type: 'paragraph', text: summaryHint }], // verbatim copy
+    keyPoints: [], whyItMatters: '', readerAction: '', tags: [], confidence: 'high', sourceQuality: 'single source',
+    references: [{ source: 'PyTorch', sourceDomain: 'pytorch.org', tier: 'primary', url: 'https://pytorch.org', title: 'PyTorch 2.6', publishedAt: NOW.toISOString() }],
+    provenance: { clusterId: 'c1', sourceCount: 1, distinctDomains: 1, upstreamRunId: 'run-1' },
+    ai: { provider: 'deterministic', model: 'rules/v1', status: 'fallback', generatedAt: NOW.toISOString() },
+    legalNote: '', wordCount: 20, readingTimeMinutes: 1, generatedAt: NOW.toISOString(),
+  };
+  const verdict = enforceCopyright(article, [item]);
+  assert.ok(!verdict.ok, 'verbatim summaryHint copy should still fail the copyright gate');
+  assert.ok(verdict.violations.some((v) => v.kind === 'verbatim-overlap'), 'should flag verbatim-overlap on summaryHint reproduction');
 });

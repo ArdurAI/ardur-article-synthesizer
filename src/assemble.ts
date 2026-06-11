@@ -23,7 +23,7 @@
  * provenance, or render gates.
  */
 
-import type { ArticleBlock, SynthesizedArticle, AggregatedItem, Top10Entry, ArticleReference, SourceTier, ProviderMeta } from './contracts.ts';
+import type { ArticleBlock, SynthesizedArticle, AggregatedItem, Top10Entry, ArticleReference, SourceTier, ProviderMeta, ExtractedFact, ChartBlock } from './contracts.ts';
 import { VOICE_STYLE, SECTION_VOICE, buildVoiceDirective, lintVoice, type VoiceStyle } from './style.ts';
 import { scrubUrl } from './privacy.ts';
 import type { ArticleDraft } from './provider.ts';
@@ -273,9 +273,12 @@ export function assembleArticle(
     publishedAt: item.publishedAt,
   }));
 
-  // Word count over all block text
+  // Word count over all block text (text-type blocks only)
   const allText = blocks
-    .map((b) => b.text ?? (b.items ?? []).join(' '))
+    .map((b) => {
+      const tb = b as { type: string; text?: string; items?: string[] };
+      return tb.text ?? (tb.items ?? []).join(' ');
+    })
     .join(' ');
   const wc = wordCount(allText);
 
@@ -312,4 +315,71 @@ export function assembleArticle(
     readingTimeMinutes,
     generatedAt: now.toISOString(),
   };
+}
+
+// ---------------------------------------------------------------------------
+// S4 — Visual blocks from real extracted data
+// ---------------------------------------------------------------------------
+
+/**
+ * Build ChartBlock[] from the quantitative ExtractedFacts for a cluster.
+ * Only facts with a `quantity` field produce chart datapoints — no invented numbers.
+ *
+ * Groups facts by `quantity.metric` and builds one bar chart per metric that
+ * has ≥2 comparable datapoints. Single-datapoint metrics are skipped (a bar
+ * chart of one value is not informative).
+ */
+export function buildChartBlocks(
+  facts: readonly ExtractedFact[],
+  refs: readonly { source: string; url: string; sourceDomain: string }[],
+): ChartBlock[] {
+  const quantFacts = facts.filter((f) => f.quantity != null);
+  if (quantFacts.length === 0) return [];
+
+  // Group by metric name
+  const byMetric = new Map<string, ExtractedFact[]>();
+  for (const fact of quantFacts) {
+    const metric = fact.quantity!.metric;
+    const bucket = byMetric.get(metric) ?? [];
+    bucket.push(fact);
+    byMetric.set(metric, bucket);
+  }
+
+  const charts: ChartBlock[] = [];
+
+  for (const [metric, metricFacts] of byMetric) {
+    if (metricFacts.length < 2) continue; // not enough points for a comparison chart
+
+    const series = metricFacts.map((f) => ({
+      label: f.entities[0] ?? f.quantity!.asOf ?? f.id.slice(-6),
+      value: f.quantity!.value,
+      ...(f.quantity!.unit ? { unit: f.quantity!.unit } : {}),
+    }));
+
+    const factIds = metricFacts.map((f) => f.id);
+
+    // Build attribution from the refs whose domains match the fact provenance
+    const citedDomains = new Set(
+      metricFacts.flatMap((f) => f.provenance.map((p) => p.sourceDomain)),
+    );
+    const attributionSources = refs
+      .filter((r) => citedDomains.has(r.sourceDomain))
+      .map((r) => ({ source: r.source, url: r.url }))
+      .slice(0, 5);
+
+    if (attributionSources.length === 0) continue;
+
+    const unitSuffix = metricFacts[0]?.quantity?.unit ? ` (${metricFacts[0].quantity.unit})` : '';
+    charts.push({
+      type: 'chart',
+      chartType: 'bar',
+      title: `${metric}${unitSuffix}`,
+      series,
+      factIds,
+      caption: `Based on extracted data from ${attributionSources.map((s) => s.source).join(', ')}.`,
+      attribution: { sources: attributionSources },
+    });
+  }
+
+  return charts;
 }

@@ -114,11 +114,14 @@ export function enforceCopyright(
     }
   }
 
-  // 3. Verbatim overlap: non-quote body text vs. source titles/summaryHints
-  const sourceTexts = corpus.map((item) => `${item.title} ${item.summaryHint}`);
+  // 3. Verbatim overlap: non-quote body text vs. source summaryHints ONLY.
+  // Issue #11: article titles are factual identifiers (not protectable expression);
+  // including them in the corpus caused a deadlock where the deterministic fallback's
+  // legitimate headline references triggered the gate on clusters with ≥8-word titles.
+  const sourceTexts = corpus.map((item) => item.summaryHint).filter(Boolean);
   const bodyText = article.body
     .filter((b) => b.type !== 'quote') // quotes are expected to share wording
-    .map((b) => b.text ?? (b.items ?? []).join(' '))
+    .map((b) => { const tb = b as { text?: string; items?: string[] }; return tb.text ?? (tb.items ?? []).join(' '); })
     .join(' ');
 
   if (bodyText.trim()) {
@@ -135,7 +138,7 @@ export function enforceCopyright(
   const fullText = [
     article.headline,
     article.dek,
-    ...article.body.map((b) => b.text ?? (b.items ?? []).join(' ')),
+    ...article.body.map((b) => { const tb = b as { text?: string; items?: string[] }; return tb.text ?? (tb.items ?? []).join(' '); }),
     article.legalNote,
   ].join(' ');
 

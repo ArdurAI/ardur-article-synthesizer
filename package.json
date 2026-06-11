@@ -36,7 +36,7 @@
     "url": "https://github.com/ArdurAI/ardur-article-synthesizer.git"
   },
   "dependencies": {
-    "@ardurai/contracts": "github:ArdurAI/ardur-contracts#dec582a",
+    "@ardurai/contracts": "github:ArdurAI/ardur-contracts#4a47ec8",
     "jsonrepair": "^3.14.0"
   },
   "optionalDependencies": {

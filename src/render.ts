@@ -21,13 +21,21 @@
 
 import type { ArticleBlock, SynthesizedArticle } from './contracts.ts';
 
-/** Allowed block types the in-app renderer knows how to draw. */
+/**
+ * Allowed block types the in-app renderer knows how to draw.
+ * Rev 3 adds visual types: chart, image, gif, embed.
+ * Renderer rule: unknown type ⇒ skip (never throw).
+ */
 export const RENDERABLE_BLOCK_TYPES: readonly ArticleBlock['type'][] = [
   'paragraph',
   'heading',
   'list',
   'quote',
   'callout',
+  'chart',
+  'image',
+  'gif',
+  'embed',
 ];
 
 /**
@@ -61,7 +69,12 @@ export type RenderViolationKind =
   | 'raw-html-in-text'
   | 'empty-block'
   | 'too-many-blocks'
-  | 'missing-source-trail';
+  | 'missing-source-trail'
+  | 'chart-missing-attribution'
+  | 'chart-no-data'
+  | 'chart-invented-data'
+  | 'media-missing-license'
+  | 'embed-missing-provider';
 
 export interface RenderViolation {
   kind: RenderViolationKind;
@@ -103,10 +116,11 @@ export function validateRenderable(article: SynthesizedArticle): RenderViolation
     }
 
     // 3. Raw HTML in text or list items (XSS guard — all content renders as plain text in-app)
-    const textContent = block.text ?? '';
+    const tb = block as { text?: string; items?: string[] };
+    const textContent = tb.text ?? '';
     const hasRawHtml =
       RAW_HTML_PATTERN.test(textContent) ||
-      (block.items ?? []).some((item) => RAW_HTML_PATTERN.test(item));
+      (tb.items ?? []).some((item: string) => RAW_HTML_PATTERN.test(item));
     if (hasRawHtml) {
       violations.push({
         kind: 'raw-html-in-text',
@@ -115,16 +129,46 @@ export function validateRenderable(article: SynthesizedArticle): RenderViolation
       });
     }
 
-    // 4. Empty blocks produce dead whitespace in-app
-    const isEmpty =
-      !textContent.trim() &&
-      (!block.items || block.items.length === 0 || block.items.every((it) => !it.trim()));
-    if (isEmpty) {
-      violations.push({
-        kind: 'empty-block',
-        detail: `Empty block at index ${i} (type: ${block.type})`,
-        blockIndex: i,
-      });
+    // 4. Empty blocks produce dead whitespace in-app (text types only)
+    if (block.type !== 'chart' && block.type !== 'image' && block.type !== 'gif' && block.type !== 'embed') {
+      const isEmpty =
+        !textContent.trim() &&
+        (!tb.items || tb.items.length === 0 || tb.items.every((it: string) => !it.trim()));
+      if (isEmpty) {
+        violations.push({
+          kind: 'empty-block',
+          detail: `Empty block at index ${i} (type: ${block.type})`,
+          blockIndex: i,
+        });
+      }
+    }
+
+    // 5. Visual block invariants (Rev 3)
+    if (block.type === 'chart') {
+      const chart = block as import('./contracts.ts').ChartBlock;
+      if (!chart.series || chart.series.length === 0) {
+        violations.push({ kind: 'chart-no-data', detail: `Chart at index ${i} has no series data`, blockIndex: i });
+      }
+      if (!chart.factIds || chart.factIds.length === 0) {
+        violations.push({ kind: 'chart-invented-data', detail: `Chart at index ${i} missing factIds — every datapoint must trace to an ExtractedFact`, blockIndex: i });
+      }
+      if (!chart.attribution?.sources?.length) {
+        violations.push({ kind: 'chart-missing-attribution', detail: `Chart at index ${i} missing attribution`, blockIndex: i });
+      }
+    }
+
+    if (block.type === 'image' || block.type === 'gif') {
+      const media = (block as import('./contracts.ts').ImageBlock | import('./contracts.ts').GifBlock).media;
+      if (media?.origin === 'openly-licensed' && !media.license) {
+        violations.push({ kind: 'media-missing-license', detail: `${block.type} block at index ${i} is openly-licensed but missing license field`, blockIndex: i });
+      }
+    }
+
+    if (block.type === 'embed') {
+      const embed = block as import('./contracts.ts').EmbedBlock;
+      if (!embed.provider) {
+        violations.push({ kind: 'embed-missing-provider', detail: `Embed block at index ${i} missing provider`, blockIndex: i });
+      }
     }
   }
 
