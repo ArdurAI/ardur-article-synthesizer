@@ -34,6 +34,7 @@ import type {
   ChartBlock,
 } from './contracts.ts';
 import { SCHEMA_VERSION, CONTRACT_REVISION, assertCompatibleArtifact } from './contracts.ts';
+import { parseTop10Artifact, parseAggregationArtifact } from '@ardurai/contracts/zod';
 
 /**
  * ArticleArtifact extended with a separate held-articles queue (#18).
@@ -432,10 +433,17 @@ export async function synthesizeCycle(ctx: SynthesizeContext): Promise<ArticleAr
   const { top10, aggregation, now } = ctx;
 
   const gateWarnings: string[] = [];
+  // Tier-1 — envelope version/stage check; collects forward-compat warnings (e.g. newer contractRevision).
+  // Throws SchemaVersionError on hard incompatibilities.
   const { warnings: w1 } = assertCompatibleArtifact(top10 as unknown, 'top10');
   gateWarnings.push(...w1);
   const { warnings: w2 } = assertCompatibleArtifact(aggregation as unknown, 'aggregation');
   gateWarnings.push(...w2);
+  // Tier-2 — full Zod structural validation at the input boundary.
+  // Throws ZodError when required fields are missing, scores contain NaN/Infinity, etc.
+  // parseTop10Artifact / parseAggregationArtifact re-run Tier-1 internally (fast) then apply Zod.
+  parseTop10Artifact(top10 as unknown);
+  parseAggregationArtifact(aggregation as unknown);
 
   const cycleWarnings: string[] = [...gateWarnings];
   if (top10.cycle.id !== aggregation.cycle.id) {

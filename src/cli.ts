@@ -17,8 +17,10 @@
  */
 
 import { readFileSync, writeFileSync } from 'node:fs';
+import { ZodError } from 'zod';
 import { runSynthesis } from './index.ts';
 import { assertCompatibleArtifact, SchemaVersionError } from './contracts.ts';
+import { parseTop10Artifact, parseAggregationArtifact } from '@ardurai/contracts/zod';
 import { createProvider } from './provider.ts';
 import { DESCRIPTOR } from './describe.ts';
 import type { Top10Artifact, AggregationArtifact } from './contracts.ts';
@@ -130,9 +132,12 @@ function readRawJson(pathOrDash: string): unknown {
 
 function gateTop10(raw: unknown): Top10Artifact {
   try {
-    const { envelope, warnings } = assertCompatibleArtifact(raw, 'top10');
+    // Tier-1: collect forward-compat notices; structural version mismatches throw SchemaVersionError.
+    const { warnings } = assertCompatibleArtifact(raw, 'top10');
     for (const w of warnings) process.stderr.write(`[warn] top10 gate: ${w}\n`);
-    return envelope as Top10Artifact;
+    // Tier-2: full Zod structural validation — rejects NaN scores, missing required fields, etc.
+    // parseTop10Artifact re-runs Tier-1 internally (fast, no I/O) then applies the Zod schema.
+    return parseTop10Artifact(raw) as Top10Artifact;
   } catch (err) {
     if (err instanceof SchemaVersionError) {
       emitError(
@@ -141,21 +146,37 @@ function gateTop10(raw: unknown): Top10Artifact {
         JSON.stringify(err.detail),
       );
     }
+    if (err instanceof ZodError) {
+      emitError(
+        'SCHEMA_GATE_FAILED',
+        `top10 Zod validation failed — malformed input`,
+        JSON.stringify(err.issues.slice(0, 5)),
+      );
+    }
     throw err;
   }
 }
 
 function gateAggregation(raw: unknown): AggregationArtifact {
   try {
-    const { envelope, warnings } = assertCompatibleArtifact(raw, 'aggregation');
+    // Tier-1: collect forward-compat notices; structural version mismatches throw SchemaVersionError.
+    const { warnings } = assertCompatibleArtifact(raw, 'aggregation');
     for (const w of warnings) process.stderr.write(`[warn] aggregation gate: ${w}\n`);
-    return envelope as AggregationArtifact;
+    // Tier-2: full Zod structural validation.
+    return parseAggregationArtifact(raw) as AggregationArtifact;
   } catch (err) {
     if (err instanceof SchemaVersionError) {
       emitError(
         'SCHEMA_GATE_FAILED',
         `aggregation schema gate failed: ${err.message}`,
         JSON.stringify(err.detail),
+      );
+    }
+    if (err instanceof ZodError) {
+      emitError(
+        'SCHEMA_GATE_FAILED',
+        `aggregation Zod validation failed — malformed input`,
+        JSON.stringify(err.issues.slice(0, 5)),
       );
     }
     throw err;

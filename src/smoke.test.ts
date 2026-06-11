@@ -1525,3 +1525,59 @@ test('Ollama Cloud: explicit ARDUR_AI_PROVIDER=deterministic overrides cloud key
   const p = createProvider({ env: { ARDUR_AI_PROVIDER: 'deterministic', OLLAMA_API_KEY: 'test-key-abc' } });
   assert.equal(p.name, 'deterministic', 'explicit deterministic provider must override cloud key');
 });
+
+// ---------------------------------------------------------------------------
+// contracts #2 adoption — Tier-2 Zod input-boundary gate
+// ---------------------------------------------------------------------------
+
+import { ZodError } from 'zod';
+
+test('contracts #2: runSynthesis rejects top10 with structurally invalid data (Tier-2 Zod gate)', async () => {
+  // score.total is NaN — serialises as null in JSON; Zod .finite() rejects it
+  const badTop10 = makeTop10();
+  (badTop10 as unknown as Record<string, unknown>).data = {
+    ...badTop10.data,
+    global: [{ ...makeEntry(), score: { ...makeEntry().score, total: null } }],
+    top10ByTopic: {},
+  };
+  await assert.rejects(
+    () => runSynthesis({
+      top10: badTop10 as unknown as ReturnType<typeof makeTop10>,
+      aggregation: makeAggregation(),
+      provider: createProvider({ provider: 'deterministic' }),
+      now: NOW,
+    }),
+    (err: unknown) => err instanceof ZodError,
+    'Zod should reject null score.total (NaN serialised) from top10',
+  );
+});
+
+test('contracts #2: runSynthesis rejects aggregation with structurally invalid data (Tier-2 Zod gate)', async () => {
+  // itemsByTopic is not a record of arrays — malformed input
+  const badAgg = makeAggregation();
+  (badAgg as unknown as Record<string, unknown>).data = {
+    ...badAgg.data,
+    itemsByTopic: 'not-an-object',
+  };
+  await assert.rejects(
+    () => runSynthesis({
+      top10: makeTop10(),
+      aggregation: badAgg as unknown as ReturnType<typeof makeAggregation>,
+      provider: createProvider({ provider: 'deterministic' }),
+      now: NOW,
+    }),
+    (err: unknown) => err instanceof ZodError,
+    'Zod should reject aggregation with non-object itemsByTopic',
+  );
+});
+
+test('contracts #2: valid fixture inputs pass Tier-2 Zod gate without error', async () => {
+  // Both fixtures were constructed to match the schema — no errors expected
+  const artifact = await runSynthesis({
+    top10: makeTop10(),
+    aggregation: makeAggregation(),
+    provider: createProvider({ provider: 'deterministic' }),
+    now: NOW,
+  });
+  assert.equal(artifact.schemaVersion, SCHEMA_VERSION, 'valid fixtures must produce an artifact');
+});
