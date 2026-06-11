@@ -4,8 +4,12 @@
  * Extracted and generalized from `ardur.ai/main:src/lib/aiProvider.mjs`
  * (`generateSignalBrief`).
  *
- * Provider order: deterministic (default, zero-cost) -> ollama (local-first,
- * cloud only if OLLAMA_API_KEY set) -> openai (optional).
+ * Provider precedence (auto-detection):
+ *   1. Ollama Cloud — PRIMARY when `OLLAMA_API_KEY` is set.
+ *      Host: https://ollama.com  Auth: Bearer $OLLAMA_API_KEY
+ *      Default model: gpt-oss:120b (override with OLLAMA_MODEL).
+ *   2. Local Ollama — when `OLLAMA_HOST` is set (or ARDUR_AI_PROVIDER=ollama explicit).
+ *   3. Deterministic fallback — zero-cost, rules-based, always succeeds (HOLDs articles).
  *
  * `ARDUR_AI_ENABLED=0` or `ARDUR_AI_PROVIDER=deterministic` forces the
  * deterministic path with NO network calls (this is the CI default).
@@ -21,6 +25,10 @@
  * The LLM path receives `GenerateRequest.voiceDirective` in its prompt;
  * the deterministic path applies the same VOICE_STYLE to its templates so a
  * budget=0 article reads on-voice — not as dry newswire.
+ *
+ * SECURITY: the API key is read from the environment ONLY — never hardcoded,
+ * logged, or committed. Pass `fetchFn` in `ProviderConfig` to inject a mock
+ * in tests; no real network calls should occur in CI.
  */
 
 import { z } from 'zod';
@@ -127,6 +135,8 @@ export interface ProviderConfig {
   env?: NodeJS.ProcessEnv;
   /** Injected wall-clock instant; threads into all providers so generatedAt is deterministic under replay. */
   now?: Date;
+  /** Injected fetch implementation — use in tests to mock the Ollama/OpenAI network call. Never set in production. */
+  fetchFn?: typeof fetch;
 }
 
 // ---------------------------------------------------------------------------
@@ -382,30 +392,42 @@ class DeterministicProvider implements AiProvider {
 }
 
 // ---------------------------------------------------------------------------
-// Ollama provider — local-first
+// Ollama provider — cloud (https://ollama.com) or local (OLLAMA_HOST)
 // ---------------------------------------------------------------------------
+
+type OllamaMode = 'cloud' | 'local';
 
 class OllamaProvider implements AiProvider {
   readonly name: ProviderName = 'ollama';
+  /** 'cloud' = Ollama Cloud via /api/chat + Bearer auth; 'local' = /api/generate. */
+  readonly mode: OllamaMode;
   private _used = 0;
   private readonly maxGenerations: number;
   private readonly timeoutMs: number;
   private readonly model: string;
   private readonly baseUrl: string;
+  private readonly apiKey: string | undefined;
   private readonly now: Date;
+  private readonly _fetch: typeof fetch;
 
   constructor(opts: {
+    mode: OllamaMode;
     maxGenerations: number;
     timeoutMs: number;
     model?: string;
     baseUrl?: string;
+    apiKey?: string;
     now?: Date;
+    fetchFn?: typeof fetch;
   }) {
+    this.mode = opts.mode;
     this.maxGenerations = opts.maxGenerations;
     this.timeoutMs = opts.timeoutMs;
-    this.model = opts.model ?? 'llama3.1';
-    this.baseUrl = opts.baseUrl ?? 'http://127.0.0.1:11434';
+    this.model = opts.model ?? (opts.mode === 'cloud' ? 'gpt-oss:120b' : 'llama3.1');
+    this.baseUrl = opts.baseUrl ?? (opts.mode === 'cloud' ? 'https://ollama.com' : 'http://127.0.0.1:11434');
+    this.apiKey = opts.apiKey;
     this.now = opts.now ?? new Date();
+    this._fetch = opts.fetchFn ?? fetch;
   }
 
   canGenerate(): boolean {
@@ -433,24 +455,47 @@ class OllamaProvider implements AiProvider {
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
 
     try {
-      const resp = await fetch(`${this.baseUrl}/api/generate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: this.model, prompt, format: 'json', stream: false }),
-        signal: controller.signal,
-      });
+      let rawContent: string;
 
-      clearTimeout(timer);
-
-      if (!resp.ok) {
-        return {
-          draft: request.fallback,
-          meta: { ...fallbackMeta, reason: `ollama HTTP ${resp.status}` },
-        };
+      if (this.mode === 'cloud') {
+        // Ollama Cloud: POST /api/chat with Bearer auth + chat messages format
+        const resp = await this._fetch(`${this.baseUrl}/api/chat`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${this.apiKey}`,
+          },
+          body: JSON.stringify({
+            model: this.model,
+            messages: [{ role: 'user', content: prompt }],
+            stream: false,
+            format: 'json',
+          }),
+          signal: controller.signal,
+        });
+        clearTimeout(timer);
+        if (!resp.ok) {
+          return { draft: request.fallback, meta: { ...fallbackMeta, reason: `ollama-cloud HTTP ${resp.status}` } };
+        }
+        const data = await resp.json() as { message?: { content?: string } };
+        rawContent = data.message?.content ?? '';
+      } else {
+        // Local Ollama: POST /api/generate (generate endpoint)
+        const resp = await this._fetch(`${this.baseUrl}/api/generate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: this.model, prompt, format: 'json', stream: false }),
+          signal: controller.signal,
+        });
+        clearTimeout(timer);
+        if (!resp.ok) {
+          return { draft: request.fallback, meta: { ...fallbackMeta, reason: `ollama HTTP ${resp.status}` } };
+        }
+        const raw = await resp.json() as { response?: string };
+        rawContent = raw.response ?? '';
       }
 
-      const raw = await resp.json() as { response?: string };
-      const parsed = parseAndMergeDraft(raw.response ?? '', request.fallback);
+      const parsed = parseAndMergeDraft(rawContent, request.fallback);
       this._used++;
 
       return {
@@ -748,17 +793,23 @@ function repairJsonSync(raw: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve the provider chain from env/config. Defaults to the deterministic,
- * zero-cost provider — matching ardur.ai's existing `budget=0` posture.
+ * Resolve the provider chain from env/config.
+ *
+ * Auto-detection precedence (when ARDUR_AI_PROVIDER is not explicitly set):
+ *   1. Ollama Cloud  — OLLAMA_API_KEY is set → host https://ollama.com, model gpt-oss:120b
+ *   2. Local Ollama  — OLLAMA_HOST is set    → POST /api/generate at that host
+ *   3. Deterministic — zero-cost fallback    → articles are held (never published)
+ *
+ * Explicit overrides (ARDUR_AI_PROVIDER or config.provider) take precedence over auto-detection.
+ * ARDUR_AI_ENABLED=0 always forces deterministic regardless of other settings.
  */
 export function createProvider(config: ProviderConfig = {}): AiProvider {
   const env = config.env ?? process.env;
 
   const enabled = config.enabled ?? (env['ARDUR_AI_ENABLED'] !== '0');
-  const providerName: ProviderName =
+  const explicitProvider: ProviderName | undefined =
     (config.provider as ProviderName | undefined) ??
-    (env['ARDUR_AI_PROVIDER'] as ProviderName | undefined) ??
-    'deterministic';
+    (env['ARDUR_AI_PROVIDER'] as ProviderName | undefined);
 
   const maxGenerations = config.maxGenerations
     ?? parseInt(env['ARDUR_AI_MAX_GENERATIONS'] ?? '20', 10);
@@ -768,20 +819,48 @@ export function createProvider(config: ProviderConfig = {}): AiProvider {
   const now = config.now;
   // Helpers to avoid passing `now: undefined` under exactOptionalPropertyTypes.
   const nowOpt = now !== undefined ? { now } : {};
+  const fetchFn = config.fetchFn;
+  const fetchOpt = fetchFn !== undefined ? { fetchFn } : {};
 
-  if (!enabled || providerName === 'deterministic') {
+  if (!enabled || explicitProvider === 'deterministic') {
     return new DeterministicProvider(now);
   }
 
-  if (providerName === 'ollama') {
-    const apiKey = env['OLLAMA_API_KEY'];
-    const baseUrl = apiKey
-      ? (env['OLLAMA_API_BASE'] ?? 'https://api.ollama.ai')
-      : 'http://127.0.0.1:11434';
-    return new OllamaProvider({ maxGenerations, timeoutMs, baseUrl, ...nowOpt });
+  // Ollama Cloud PRIMARY when OLLAMA_API_KEY is set; local when OLLAMA_HOST is set.
+  const ollamaApiKey = env['OLLAMA_API_KEY'];
+  const ollamaHost = env['OLLAMA_HOST'];
+
+  if (explicitProvider === 'ollama' || explicitProvider === undefined) {
+    if (ollamaApiKey) {
+      return new OllamaProvider({
+        mode: 'cloud',
+        maxGenerations,
+        timeoutMs,
+        model: env['OLLAMA_MODEL'] ?? 'gpt-oss:120b',
+        baseUrl: 'https://ollama.com',
+        apiKey: ollamaApiKey,
+        ...nowOpt,
+        ...fetchOpt,
+      });
+    }
+    if (ollamaHost !== undefined || explicitProvider === 'ollama') {
+      return new OllamaProvider({
+        mode: 'local',
+        maxGenerations,
+        timeoutMs,
+        model: env['OLLAMA_MODEL'] ?? 'llama3.1',
+        baseUrl: ollamaHost ?? 'http://127.0.0.1:11434',
+        ...nowOpt,
+        ...fetchOpt,
+      });
+    }
+    // Auto-detect: no cloud key, no local host → deterministic (articles held)
+    if (explicitProvider === undefined) {
+      return new DeterministicProvider(now);
+    }
   }
 
-  if (providerName === 'openai') {
+  if (explicitProvider === 'openai') {
     const apiKey = env['OPENAI_API_KEY'];
     if (!apiKey) {
       return new DeterministicProvider(now);

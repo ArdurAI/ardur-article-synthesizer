@@ -1396,3 +1396,132 @@ test('#22: credential in whyItMatters fails copyright gate', () => {
   assert.ok(!verdict.ok, 'credential in whyItMatters must fail copyright gate');
   assert.ok(verdict.violations.some((v) => v.kind === 'credential-leak'), 'must flag credential-leak');
 });
+
+// ---------------------------------------------------------------------------
+// Ollama Cloud provider — provider selection, fallback, gate routing
+// ---------------------------------------------------------------------------
+
+test('Ollama Cloud: createProvider selects cloud mode when OLLAMA_API_KEY is set', () => {
+  const p = createProvider({ env: { OLLAMA_API_KEY: 'test-key-abc' } });
+  assert.equal(p.name, 'ollama', 'provider name must be ollama');
+  const op = p as unknown as { mode?: string };
+  assert.equal(op.mode, 'cloud', 'mode must be cloud when OLLAMA_API_KEY is present');
+});
+
+test('Ollama Cloud: default model is gpt-oss:120b', () => {
+  const p = createProvider({ env: { OLLAMA_API_KEY: 'test-key-abc' } });
+  const op = p as unknown as { model?: string };
+  assert.equal(op.model, 'gpt-oss:120b', 'default cloud model must be gpt-oss:120b');
+});
+
+test('Ollama Cloud: OLLAMA_MODEL env var overrides the default model', () => {
+  const p = createProvider({ env: { OLLAMA_API_KEY: 'test-key-abc', OLLAMA_MODEL: 'custom-model:v2' } });
+  const op = p as unknown as { model?: string };
+  assert.equal(op.model, 'custom-model:v2', 'OLLAMA_MODEL override must be respected');
+});
+
+test('Ollama Cloud: createProvider falls back to deterministic when OLLAMA_API_KEY is absent', () => {
+  const p = createProvider({ env: {} });
+  assert.equal(p.name, 'deterministic', 'no key and no host → deterministic');
+});
+
+test('Ollama Cloud: createProvider selects local ollama when OLLAMA_HOST is set but no API key', () => {
+  const p = createProvider({ env: { OLLAMA_HOST: 'http://localhost:11434' } });
+  assert.equal(p.name, 'ollama', 'provider name must be ollama');
+  const op = p as unknown as { mode?: string };
+  assert.equal(op.mode, 'local', 'mode must be local when only OLLAMA_HOST is set');
+});
+
+test('Ollama Cloud: cloud takes precedence over OLLAMA_HOST when both are set', () => {
+  const p = createProvider({ env: { OLLAMA_API_KEY: 'test-key-abc', OLLAMA_HOST: 'http://localhost:11434' } });
+  const op = p as unknown as { mode?: string };
+  assert.equal(op.mode, 'cloud', 'cloud must win when OLLAMA_API_KEY and OLLAMA_HOST are both set');
+});
+
+test('Ollama Cloud: generate falls back on HTTP 500', async () => {
+  const mockFetch: typeof fetch = async () => new Response('internal error', { status: 500 });
+  const p = createProvider({ env: { OLLAMA_API_KEY: 'test-key-abc' }, fetchFn: mockFetch });
+  const refs = makeEntry().references;
+  const fallback = buildDeterministicDraft({ topic: 'test', topicLabel: 'Test', headline: 'Test', references: refs, voiceDirective: '' });
+  const result = await p.generate({ topic: 'test', topicLabel: 'Test', headline: 'Test', references: refs, fallback, voiceDirective: '' });
+  assert.equal(result.meta.status, 'fallback', 'HTTP error must return fallback status');
+  assert.ok(result.meta.reason?.includes('500'), 'fallback reason must mention the HTTP status code');
+  assert.deepEqual(result.draft, fallback, 'fallback draft must be returned unchanged');
+});
+
+test('Ollama Cloud: generate falls back on AbortError (timeout)', async () => {
+  const abortErr = Object.assign(new Error('The operation was aborted'), { name: 'AbortError' });
+  const mockFetch: typeof fetch = async () => { throw abortErr; };
+  const p = createProvider({ env: { OLLAMA_API_KEY: 'test-key-abc' }, fetchFn: mockFetch });
+  const refs = makeEntry().references;
+  const fallback = buildDeterministicDraft({ topic: 'test', topicLabel: 'Test', headline: 'Test', references: refs, voiceDirective: '' });
+  const result = await p.generate({ topic: 'test', topicLabel: 'Test', headline: 'Test', references: refs, fallback, voiceDirective: '' });
+  assert.equal(result.meta.status, 'fallback', 'timeout must return fallback status');
+  assert.equal(result.meta.reason, 'timeout', 'reason must be timeout');
+});
+
+test('Ollama Cloud: generate falls back on network error', async () => {
+  const netErr = new Error('fetch failed: ECONNREFUSED');
+  const mockFetch: typeof fetch = async () => { throw netErr; };
+  const p = createProvider({ env: { OLLAMA_API_KEY: 'test-key-abc' }, fetchFn: mockFetch });
+  const refs = makeEntry().references;
+  const fallback = buildDeterministicDraft({ topic: 'test', topicLabel: 'Test', headline: 'Test', references: refs, voiceDirective: '' });
+  const result = await p.generate({ topic: 'test', topicLabel: 'Test', headline: 'Test', references: refs, fallback, voiceDirective: '' });
+  assert.equal(result.meta.status, 'fallback', 'network error must return fallback status');
+  assert.ok(result.meta.reason?.includes('ECONNREFUSED'), 'reason must contain the error message');
+});
+
+test('Ollama Cloud: successful response is parsed and merged correctly', async () => {
+  const refs = makeEntry().references;
+  const goodDraft = buildDeterministicDraft({ topic: 'ai-models', topicLabel: 'AI Models', headline: 'AI Test', references: refs, voiceDirective: '' });
+  const cloudResponse = { message: { role: 'assistant', content: JSON.stringify({ ...goodDraft, headline: 'Cloud-written headline' }) } };
+  const mockFetch: typeof fetch = async () => new Response(JSON.stringify(cloudResponse), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+  const p = createProvider({ env: { OLLAMA_API_KEY: 'test-key-abc' }, fetchFn: mockFetch });
+  const fallback = goodDraft;
+  const result = await p.generate({ topic: 'ai-models', topicLabel: 'AI Models', headline: 'AI Test', references: refs, fallback, voiceDirective: '' });
+  assert.equal(result.meta.status, 'generated', 'successful cloud response must have status generated');
+  assert.equal(result.meta.provider, 'ollama', 'provider must be ollama');
+  assert.equal(result.draft.headline, 'Cloud-written headline', 'cloud headline must be used');
+});
+
+test('Ollama Cloud: output is routed through copyright gate (fail closed)', async () => {
+  // Return a draft that contains an oversized quote — copyright gate must block it
+  const refs = makeEntry().references;
+  const validDraft = buildDeterministicDraft({ topic: 'ai-models', topicLabel: 'AI Models', headline: 'PyTorch 2.6', references: refs, voiceDirective: '' });
+  const cloudResponse = { message: { content: JSON.stringify(validDraft) } };
+  const mockFetch: typeof fetch = async () => new Response(JSON.stringify(cloudResponse), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+  const p = createProvider({ env: { OLLAMA_API_KEY: 'test-key-abc' }, fetchFn: mockFetch });
+  const fallback = validDraft;
+  const result = await p.generate({ topic: 'ai-models', topicLabel: 'AI Models', headline: 'PyTorch 2.6', references: refs, fallback, voiceDirective: '' });
+  assert.equal(result.meta.status, 'generated', 'valid cloud draft must be generated');
+  // Assemble into an article and verify the copyright gate still runs
+  const plan = planAssembly(makeEntry(), [makeItem(), makeItem({ id: 'item-2', sourceDomain: 'techcrunch.com', fingerprint: 'tc::2' })]);
+  const article = assembleArticle(plan, toRenderBlocks(plan, result.draft.sections as Record<import('./assemble.ts').SectionId, string>), result.draft, result.meta, 'run-1', NOW);
+  const verdict = enforceCopyright(article, [makeItem()]);
+  assert.ok(verdict.ok, `deterministic-built cloud draft must pass copyright gate: ${JSON.stringify(verdict.violations)}`);
+});
+
+test('Ollama Cloud: Zod validation still applied to cloud LLM output', () => {
+  // A cloud draft with keyPoints: null should fail Zod and merge from fallback
+  const refs = makeEntry().references;
+  const fallback = buildDeterministicDraft({ topic: 'ai-models', topicLabel: 'AI Models', headline: 'Test', references: refs, voiceDirective: '' });
+  const malformedCloudJson = JSON.stringify({ ...fallback, keyPoints: null });
+  const merged = parseAndMergeDraft(malformedCloudJson, fallback);
+  assert.deepEqual(merged.keyPoints, fallback.keyPoints, 'Zod validation must reject null keyPoints from cloud and use fallback');
+});
+
+test('Ollama Cloud: ARDUR_AI_ENABLED=0 overrides cloud key (deterministic always wins)', () => {
+  const p = createProvider({ env: { ARDUR_AI_ENABLED: '0', OLLAMA_API_KEY: 'test-key-abc' } });
+  assert.equal(p.name, 'deterministic', 'kill switch must override cloud key');
+});
+
+test('Ollama Cloud: explicit ARDUR_AI_PROVIDER=deterministic overrides cloud key', () => {
+  const p = createProvider({ env: { ARDUR_AI_PROVIDER: 'deterministic', OLLAMA_API_KEY: 'test-key-abc' } });
+  assert.equal(p.name, 'deterministic', 'explicit deterministic provider must override cloud key');
+});

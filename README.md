@@ -49,7 +49,7 @@ that the ardur.ai app renders directly.
 | Guarantee | How it is enforced | Module |
 |-----------|--------------------|--------|
 | **Copyright-safe** | Original text only; quotes < 25 words + attribution; canonical link per source; verbatim-overlap + credential screens; **never** reproduce article bodies. Fails **closed**. | [`src/copyright.ts`](./src/copyright.ts) |
-| **Cost-guarded AI** | Provider order `deterministic → ollama → openai`. `ARDUR_AI_MAX_GENERATIONS` budget + per-call timeout; any failure falls back to deterministic. CI is always deterministic (zero cost, no network). | [`src/provider.ts`](./src/provider.ts) |
+| **Cost-guarded AI** | Auto-detected precedence: **Ollama Cloud** (`OLLAMA_API_KEY` set) → **local Ollama** (`OLLAMA_HOST` set) → **deterministic**. `ARDUR_AI_MAX_GENERATIONS` budget + per-call timeout; any failure falls back to deterministic. CI is always deterministic (zero cost, no network). | [`src/provider.ts`](./src/provider.ts) |
 | **Provenance per claim** | Every factual claim is tied to its supporting sources; ungrounded claims never ship. | [`src/provenance.ts`](./src/provenance.ts) |
 | **Privacy** | No PII in URLs or logs; tracking params stripped; metric/log keys screened against `FORBIDDEN_METRIC_KEY_FRAGMENTS`. | [`src/privacy.ts`](./src/privacy.ts) |
 | **In-app render** | Typed `ArticleBlock[]`, source trail kept separate from prose, no external navigation. | [`src/render.ts`](./src/render.ts) |
@@ -63,12 +63,46 @@ npm run typecheck   # tsc --noEmit
 npm test            # node --test (deterministic, zero network)
 npm run build       # tsc -> dist/
 
-# once implemented:
+# Deterministic (offline, zero cost):
 ARDUR_AI_PROVIDER=deterministic npm run synthesize \
-  --top10 data/runtime/top10.json \
-  --aggregation data/runtime/aggregation.json \
+  --in data/runtime/combined.json \
   > data/runtime/articles.json
+
+# Ollama Cloud (GenZ-but-professional AI writer — primary):
+export OLLAMA_API_KEY=$(security find-generic-password -s "ollama-api-key" -w)
+# Optional model override (default: gpt-oss:120b):
+export OLLAMA_MODEL=gpt-oss:120b
+npm run synthesize --in data/runtime/combined.json > data/runtime/articles.json
 ```
+
+### Ollama Cloud key management
+
+The API key is **loaded from the environment at runtime and never committed**.
+The recommended pattern is to store it in the macOS keychain:
+
+```bash
+# Store once:
+security add-generic-password -s "ollama-api-key" -a "$USER" -w "<your-key>"
+
+# Load per session (add to your shell profile or CI secrets):
+export OLLAMA_API_KEY=$(security find-generic-password -s "ollama-api-key" -w)
+```
+
+In CI, inject `OLLAMA_API_KEY` as a repository secret. The test suite mocks all
+network calls — **no real API calls are made in CI regardless of whether the key
+is present**.
+
+### Provider precedence
+
+| Condition | Selected provider | Articles published? |
+|-----------|-------------------|---------------------|
+| `ARDUR_AI_ENABLED=0` or `ARDUR_AI_PROVIDER=deterministic` | Deterministic | No (held) |
+| `OLLAMA_API_KEY` set | **Ollama Cloud** (`gpt-oss:120b`) | Yes (if grounded) |
+| `OLLAMA_HOST` set (no cloud key) | Local Ollama | Yes (if grounded) |
+| Neither set | Deterministic | No (held) |
+
+`ARDUR_AI_ENABLED=0` and `ARDUR_AI_PROVIDER=deterministic` always win — no
+network calls are made even if a key is present.
 
 Configuration lives in [`.env.example`](./.env.example) — provider, kill switch,
 generation budget, timeout, and optional Ollama/OpenAI settings.
