@@ -173,6 +173,12 @@ function sourceList(refs: SourceRef[], max = 3): string {
   return `${names.slice(0, -1).join(', ')}, and ${last ?? ''}`;
 }
 
+function shortBodyCue(value: string, maxWords = 5): string {
+  const words = value.trim().replace(/\s+/g, ' ').split(' ').filter(Boolean);
+  if (words.length <= maxWords) return words.join(' ');
+  return `${words.slice(0, maxWords).join(' ')}...`;
+}
+
 /** Strip the existing headline and rewrite in active voice. */
 function rewriteHeadline(original: string, topSource: SourceRef): string {
   // If already starts with a source name, keep it; otherwise prepend an Ardur voice rewrite
@@ -198,7 +204,7 @@ function buildKeyTakeaway(headline: string, refs: SourceRef[], isCorroborated: b
   const when = formatDate(top.publishedAt);
   const sources = sourceList(refs, 2);
   const hedge = isCorroborated ? '' : ` According to ${top.source}, `;
-  return `${top.source} ${verb} this on ${when}${hedge ? '' : `, and ${sources} ${isCorroborated ? 'both' : ''} covered it`}. ${headline}. Here's what actually changed and why your work might be affected.`;
+  return `${top.source} ${verb} this on ${when}${hedge ? '' : `, and ${sources} ${isCorroborated ? 'both' : ''} covered it`}. The short version: ${shortBodyCue(headline)}. Here's what actually changed and why your work might be affected.`;
 }
 
 function buildWhyThisMatters(topicLabel: string, refs: SourceRef[], isCorroborated: boolean): string {
@@ -226,22 +232,14 @@ function buildWhatHappened(headline: string, refs: SourceRef[], isCorroborated: 
   const when = formatDate(topRef.publishedAt);
   const sourceCount = new Set(refs.map((r) => r.sourceDomain)).size;
 
-  const recentRefs = refs
-    .slice(0, 3)
-    .map((r) => r.title)
-    .filter(Boolean);
-
   let body = `${topRef.source} ${verb} this on ${when}. `;
   body += isCorroborated
     ? `Coverage spans ${sourceCount} distinct sources. `
     : `Coverage comes from ${topRef.source} at this stage. `;
 
-  const ref0 = recentRefs[0];
-  const ref1 = recentRefs[1];
-  if (recentRefs.length >= 2 && ref0) {
-    body += `Reported aspects include: "${ref0}"`;
-    if (ref1) body += ` and "${ref1}"`;
-    body += '. ';
+  const sourceNames = sourceList(refs, 3);
+  if (sourceNames) {
+    body += `The useful read is the overlap across ${sourceNames}, not any single publisher phrasing. `;
   }
 
   body += isCorroborated
@@ -278,7 +276,7 @@ function buildArdurTake(headline: string, refs: SourceRef[], confidence: Confide
   }[confidence];
   const sourceCount = new Set(refs.map((r) => r.sourceDomain)).size;
 
-  return `${isCorroborated ? `${sourceCount} sources point the same direction on this` : `One source for now`} — ${headline.toLowerCase().replace(/[.!?]$/, '')}. ${confidencePhrase} based on the source coverage. ${isCorroborated ? 'Worth acting on if this falls in your domain.' : 'Wait for corroboration before making significant changes based on this alone.'}`;
+  return `${isCorroborated ? `${sourceCount} sources point the same direction on this` : `One source for now`} — ${shortBodyCue(headline).toLowerCase().replace(/[.!?]$/, '')}. ${confidencePhrase} based on the source coverage. ${isCorroborated ? 'Worth acting on if this falls in your domain.' : 'Wait for corroboration before making significant changes based on this alone.'}`;
 }
 
 function buildKeyPoints(topicLabel: string, refs: SourceRef[], isCorroborated: boolean): string[] {
@@ -797,4 +795,3 @@ export function createProvider(config: ProviderConfig = {}): AiProvider {
 
   return new DeterministicProvider(now);
 }
-
