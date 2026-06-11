@@ -837,6 +837,42 @@ test('runSynthesis held articles have valid body content for editorial review', 
   assert.ok(article.wordCount >= MIN_BODY_WORDS, 'held article must meet word count for editorial review');
 });
 
+test('deterministic fallback avoids verbatim long source titles in article body', async () => {
+  const longTitle = 'Unpatched Langflow flaw CVE 2026 5027 exploited for unauthenticated remote code execution';
+  const top10 = makeTop10();
+  const entry = top10.data.global[0];
+  assert.ok(entry, 'fixture entry must exist');
+  entry.headline = longTitle;
+  entry.references = [
+    { source: 'Security Lab', sourceDomain: 'security.example', tier: 'security-news', url: 'https://security.example/langflow-rce', title: longTitle, publishedAt: NOW.toISOString() },
+    { source: 'Vendor Advisory', sourceDomain: 'vendor.example', tier: 'primary', url: 'https://vendor.example/advisory', title: 'Vendor advisory confirms active exploitation window', publishedAt: NOW.toISOString() },
+  ];
+  top10.data.top10ByTopic['ai-models'] = [entry];
+
+  const aggregation = makeAggregation();
+  const items = aggregation.data.itemsByTopic['ai-models'];
+  assert.ok(items?.[0], 'fixture item must exist');
+  items[0].title = longTitle;
+  items[0].summaryHint = longTitle;
+
+  const artifact = await runSynthesis({
+    top10,
+    aggregation,
+    provider: createProvider({ provider: 'deterministic' }),
+    now: NOW,
+  });
+  const article = artifact.data.heldArticles[0];
+  assert.ok(article, `held article should survive copyright gate; warnings: ${artifact.warnings.join('; ')}`);
+  const bodyText = article.body
+    .map((block) => {
+      const textBlock = block as { text?: string; items?: string[] };
+      return textBlock.text ?? (textBlock.items ?? []).join(' ');
+    })
+    .join(' ');
+  assert.equal(bodyText.includes(longTitle), false, 'body must not reproduce the full long source title');
+  assert.equal(artifact.warnings.some((warning) => warning.includes('Copyright gate failed')), false);
+});
+
 test('CONTRACT_REVISION is 3 (Rev 3 published)', () => {
   assert.equal(CONTRACT_REVISION, 3, 'CONTRACT_REVISION should be 3 after Rev 3 contracts');
 });
@@ -1382,10 +1418,15 @@ test('#22: credential in tags fails copyright gate', () => {
 });
 
 test('#22: credential in whyItMatters fails copyright gate', () => {
+  const fakeJwt = [
+    'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9',
+    'eyJzdWIiOiIxMjM0NTY3ODkwIn0',
+    'dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U',
+  ].join('.');
   const article: SynthesizedArticle = {
     id: 'test', rank: 1, topic: 'test', topicLabel: 'Test', headline: 'Test', dek: 'Test',
     body: [{ type: 'paragraph', text: 'Clean body.' }],
-    keyPoints: [], whyItMatters: 'bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U',
+    keyPoints: [], whyItMatters: `bearer ${fakeJwt}`,
     readerAction: 'Normal.', tags: [], confidence: 'high', sourceQuality: 'corroborated',
     references: [{ source: 'T', sourceDomain: 't.com', tier: 'news', url: 'https://t.com', title: 'T', publishedAt: NOW.toISOString() }],
     provenance: { clusterId: 'c1', sourceCount: 1, distinctDomains: 1, upstreamRunId: 'run-1' },
