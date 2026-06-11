@@ -1,0 +1,49 @@
+{
+  "name": "@ardurai/article-synthesizer",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Copyright-safe original article synthesis from Top-10 topics + clustered sources for the Ardur AI content pipeline (stage 4)",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    ".": "./dist/index.js",
+    "./contracts": "./dist/contracts.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test --experimental-strip-types src/smoke.test.ts",
+    "synthesize": "node --experimental-strip-types src/cli.ts"
+  },
+  "keywords": [
+    "ardur",
+    "article",
+    "synthesis",
+    "copyright-safe",
+    "provenance",
+    "content-pipeline"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ArdurAI/ardur-article-synthesizer.git"
+  },
+  "dependencies": {
+    "jsonrepair": "^3.14.0"
+  },
+  "optionalDependencies": {
+    "openai": "^6.42.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "@types/node": "^22.10.0"
+  }
+}
