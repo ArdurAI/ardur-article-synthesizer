@@ -1,8 +1,6 @@
 /**
  * Provenance — every generated claim is traceable to the sources that support it.
  *
- * SCAFFOLD ONLY — signatures are final; bodies are stubs.
- *
  * The shared `SynthesizedArticle.provenance` (in contracts.ts) is article-level:
  * clusterId, sourceCount, distinctDomains, upstreamRunId. That stays the wire
  * format. This module adds the FINER-GRAINED, per-claim model the synthesizer
@@ -47,21 +45,94 @@ export interface ProvenanceMap {
   unsupportedClaimCount: number;
 }
 
+/** Derive a stable id for a SourceRef (not in contracts.ts). */
+function sourceRefId(ref: SourceRef): string {
+  return `${ref.sourceDomain}::${encodeURIComponent(ref.title)}`;
+}
+
+/** Meaningful content tokens — stop words removed, min length 3. */
+const STOP_WORDS = new Set([
+  'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+  'to', 'of', 'and', 'in', 'for', 'on', 'with', 'that', 'this', 'from',
+  'it', 'its', 'at', 'by', 'or', 'but', 'as', 'has', 'have', 'had',
+  'not', 'all', 'will', 'can', 'may', 'could', 'would', 'should',
+]);
+
+function contentTokens(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length >= 3 && !STOP_WORDS.has(w));
+}
+
 /**
- * Build the provenance map for a drafted article. Implementation aligns each
- * claim to cluster sources by entity/title overlap; any factual (non-editorial)
- * claim with no supporting source is a hard failure (the claim is dropped or the
- * article degrades to deterministic).
+ * Build the provenance map for a drafted article. Aligns each claim to cluster
+ * sources by entity/title token overlap; any factual (non-editorial) claim with
+ * no supporting source is counted as unsupported (must be 0 to pass the gate).
  */
 export function buildProvenance(
-  _articleId: string,
-  _claims: readonly { text: string; blockIndex: number; isEditorial: boolean }[],
-  _sources: readonly SourceRef[],
+  articleId: string,
+  claims: readonly { text: string; blockIndex: number; isEditorial: boolean }[],
+  sources: readonly SourceRef[],
 ): ProvenanceMap {
-  throw new Error('not implemented: align claims to supporting sources');
+  const citedSourceIdSet = new Set<string>();
+  const resultClaims: ClaimProvenance[] = [];
+
+  for (let i = 0; i < claims.length; i++) {
+    const claim = claims[i];
+    if (!claim) continue;
+    const supportingSourceIds: string[] = [];
+
+    if (!claim.isEditorial) {
+      const claimTokens = new Set(contentTokens(claim.text));
+
+      for (const source of sources) {
+        const srcTokens = contentTokens(`${source.title} ${source.source} ${source.sourceDomain}`);
+        // At least 2 meaningful token matches qualifies as support
+        const matchCount = srcTokens.filter((t) => claimTokens.has(t)).length;
+        if (matchCount >= 2) {
+          const sid = sourceRefId(source);
+          supportingSourceIds.push(sid);
+          citedSourceIdSet.add(sid);
+        }
+      }
+    }
+
+    let strength: SupportStrength;
+    if (claim.isEditorial) {
+      strength = 'inferred';
+    } else if (supportingSourceIds.length >= 2) {
+      strength = 'corroborated';
+    } else if (supportingSourceIds.length === 1) {
+      strength = 'single-source';
+    } else {
+      strength = 'inferred';
+    }
+
+    resultClaims.push({
+      id: `${articleId}#c${String(i).padStart(2, '0')}`,
+      claim: claim.text,
+      blockIndex: claim.blockIndex,
+      supportingSourceIds,
+      strength,
+      isEditorial: claim.isEditorial,
+    });
+  }
+
+  const citedSources = sources.filter((s) => citedSourceIdSet.has(sourceRefId(s)));
+  const unsupportedClaimCount = resultClaims.filter(
+    (c) => !c.isEditorial && c.supportingSourceIds.length === 0,
+  ).length;
+
+  return {
+    claims: resultClaims,
+    citedSources: [...citedSources],
+    unsupportedClaimCount,
+  };
 }
 
 /** True iff every factual claim has >= 1 supporting source. */
-export function isFullyGrounded(_map: ProvenanceMap): boolean {
-  throw new Error('not implemented');
+export function isFullyGrounded(map: ProvenanceMap): boolean {
+  return map.unsupportedClaimCount === 0;
 }

@@ -5,9 +5,6 @@
  * about) plus the `AggregationArtifact` (the 20–30 clustered sources per topic),
  * and emit an `ArticleArtifact` containing one ORIGINAL, copyright-safe article
  * per Top-10 entry, rendered in-app with no navigation away.
- *
- * SCAFFOLD ONLY — wiring/signatures are final; module bodies are stubs. The
- * synthesis logic is intentionally NOT implemented here (see docs/spec.md).
  */
 
 import type {
@@ -16,6 +13,9 @@ import type {
   Top10Artifact,
   CycleMeta,
 } from './contracts.ts';
+import { synthesizeCycle } from './synthesize.ts';
+import { createProvider } from './provider.ts';
+import type { AiProvider } from './provider.ts';
 
 export * from './contracts.ts';
 export type { AiProvider, ProviderName, GenerateRequest, GenerateResult } from './provider.ts';
@@ -48,13 +48,13 @@ export interface SynthesisOptions {
   /** Override the wall clock (testing/replay). */
   now?: Date;
   /** Injected provider for tests; defaults to the env-resolved provider chain. */
-  provider?: import('./provider.ts').AiProvider;
+  provider?: AiProvider;
 }
 
 /**
  * Synthesize one cycle's articles and return the artifact.
  *
- * Guarantees (enforced even in stubs once implemented):
+ * Guarantees:
  *  - One `SynthesizedArticle` per `Top10Entry`, never more.
  *  - Every article passes the copyright guard (original text, quotes < 25 words,
  *    no reproduced bodies, attribution + canonical links present).
@@ -62,8 +62,16 @@ export interface SynthesisOptions {
  *  - A model failure/budget exhaustion degrades that article to the deterministic
  *    path and records a `warning` — it never aborts the run.
  */
-export function runSynthesis(_options: SynthesisOptions): Promise<ArticleArtifact> {
-  throw new Error(
-    'not implemented: top10 -> gather cluster members -> assemble -> provider -> copyright + provenance guards -> ArticleArtifact',
-  );
+export function runSynthesis(options: SynthesisOptions): Promise<ArticleArtifact> {
+  const provider = options.provider ?? createProvider();
+  const now = options.now ?? new Date();
+
+  return synthesizeCycle({
+    top10: options.top10,
+    aggregation: options.aggregation,
+    provider,
+    maxGenerations: options.maxGenerations ?? 20,
+    perCallTimeoutMs: options.perCallTimeoutMs ?? 20_000,
+    now,
+  });
 }

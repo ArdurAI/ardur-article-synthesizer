@@ -1,15 +1,9 @@
 /**
  * Voice & style configuration — the Ardur house voice, as code.
  *
- * SCAFFOLD ONLY — the config object is final; the helpers are stubs.
- *
  * VOICE = "GenZ-but-professional." Credible, accurate, fully sourced — but NOT
  * dry newswire. Plain-language, engaging, a little irreverent, genuinely
  * interesting. Short but dense, synthesized from many sources.
- *
- * Target-voice example:
- *   "PyTorch just dropped 2.6 and the compile-time wins are real — here's what
- *    actually changed and why your training loop cares."
  *
  * This module is the SINGLE place the voice is encoded so every consumer agrees:
  *  - the provider prompt (LLM path) is built from `VOICE_STYLE` (see provider.ts).
@@ -114,10 +108,36 @@ export const SECTION_VOICE: readonly SectionVoice[] = [
  * both paths produce the SAME voice. Returns a compact, prompt-ready string.
  */
 export function buildVoiceDirective(
-  _style: VoiceStyle = VOICE_STYLE,
-  _section?: string,
+  style: VoiceStyle = VOICE_STYLE,
+  section?: string,
 ): string {
-  throw new Error('not implemented: render VOICE_STYLE (+ section intent) into a prompt/template directive');
+  const sectionVoice = section
+    ? SECTION_VOICE.find((s) => s.section === section)
+    : undefined;
+
+  const lines: string[] = [
+    `VOICE: ${style.summary}`,
+    `EXEMPLAR: "${style.exemplar}"`,
+    '',
+    'DO:',
+    ...style.do.map((r) => `- ${r}`),
+    '',
+    "DON'T:",
+    ...style.dont.map((r) => `- ${r}`),
+    '',
+    `BANNED WORDS: ${style.bannedLexicon.join(', ')}`,
+  ];
+
+  if (sectionVoice) {
+    lines.push('', `SECTION (${sectionVoice.section}): ${sectionVoice.intent}`);
+    if (sectionVoice.personality < 0.3) {
+      lines.push('Keep this section tight and factual — minimal personality.');
+    } else if (sectionVoice.personality >= 0.5) {
+      lines.push('Light personality welcome here — be engaging while staying accurate.');
+    }
+  }
+
+  return lines.join('\n');
 }
 
 /**
@@ -126,6 +146,26 @@ export function buildVoiceDirective(
  * Used to keep BOTH the LLM and deterministic outputs on-voice; failures are
  * downgraded to plainer phrasing (never blocked — accuracy already passed).
  */
-export function lintVoice(_text: string, _style: VoiceStyle = VOICE_STYLE): string[] {
-  throw new Error('not implemented: detect banned lexicon / hype / punctuation spam');
+export function lintVoice(text: string, style: VoiceStyle = VOICE_STYLE): string[] {
+  const offenders: string[] = [];
+  const lower = text.toLowerCase();
+
+  for (const lexeme of style.bannedLexicon) {
+    if (lower.includes(lexeme.toLowerCase())) {
+      offenders.push(lexeme);
+    }
+  }
+
+  // Consecutive exclamation marks are always banned
+  if (/!!/.test(text)) {
+    offenders.push('consecutive-exclamations');
+  }
+
+  // More than one exclamation per 200 characters is spammy
+  const exclamationCount = (text.match(/!/g) ?? []).length;
+  if (exclamationCount > 0 && (exclamationCount / text.length) * 200 > 1) {
+    offenders.push(`exclamation-density (${exclamationCount} in ${text.length} chars)`);
+  }
+
+  return offenders;
 }

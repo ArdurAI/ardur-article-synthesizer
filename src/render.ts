@@ -2,8 +2,6 @@
  * In-app render contract — the article is read INSIDE ardur.ai with no
  * navigation to another page.
  *
- * SCAFFOLD ONLY — signatures are final; bodies are stubs.
- *
  * The app consumes `SynthesizedArticle` directly; there is no HTML page hop and
  * no Markdown round-trip at read time. `body: ArticleBlock[]` is the render model.
  * This module defines the contract the app and the synthesizer agree on, and a
@@ -71,11 +69,77 @@ export interface RenderViolation {
   blockIndex?: number;
 }
 
+/** Raw HTML tags smuggled inside block text — catches <script>, <a href>, etc. */
+const RAW_HTML_PATTERN = /<[a-z][a-z0-9]*[\s/>]/i;
+
 /**
  * Validate that an article can be rendered in-app under RENDER_CONTRACT.
  * Catches unknown block types, unattributed quotes, raw HTML smuggled into
  * `text`, and a missing source trail.
  */
-export function validateRenderable(_article: SynthesizedArticle): RenderViolation[] {
-  throw new Error('not implemented: assert article against RENDER_CONTRACT');
+export function validateRenderable(article: SynthesizedArticle): RenderViolation[] {
+  const violations: RenderViolation[] = [];
+
+  for (let i = 0; i < article.body.length; i++) {
+    const block = article.body[i];
+    if (!block) continue;
+
+    // 1. Unknown block type
+    if (!RENDERABLE_BLOCK_TYPES.includes(block.type)) {
+      violations.push({
+        kind: 'unknown-block-type',
+        detail: `Unknown block type "${block.type}" at index ${i}`,
+        blockIndex: i,
+      });
+    }
+
+    // 2. Quote must carry visible attribution
+    if (block.type === 'quote' && (!block.attribution?.source || !block.attribution?.url)) {
+      violations.push({
+        kind: 'quote-without-attribution',
+        detail: `Quote block at index ${i} missing attribution (source and url required)`,
+        blockIndex: i,
+      });
+    }
+
+    // 3. Raw HTML in text (XSS guard — block text is rendered as plain text in-app)
+    const textContent = block.text ?? '';
+    if (RAW_HTML_PATTERN.test(textContent)) {
+      violations.push({
+        kind: 'raw-html-in-text',
+        detail: `Raw HTML detected in block text at index ${i}`,
+        blockIndex: i,
+      });
+    }
+
+    // 4. Empty blocks produce dead whitespace in-app
+    const isEmpty =
+      !textContent.trim() &&
+      (!block.items || block.items.length === 0 || block.items.every((it) => !it.trim()));
+    if (isEmpty) {
+      violations.push({
+        kind: 'empty-block',
+        detail: `Empty block at index ${i} (type: ${block.type})`,
+        blockIndex: i,
+      });
+    }
+  }
+
+  // 5. Total block count
+  if (article.body.length > RENDER_CONTRACT.maxBlocks) {
+    violations.push({
+      kind: 'too-many-blocks',
+      detail: `${article.body.length} blocks exceeds the in-app limit of ${RENDER_CONTRACT.maxBlocks}`,
+    });
+  }
+
+  // 6. Source trail — at least one reference required for readers to audit
+  if (!article.references || article.references.length === 0) {
+    violations.push({
+      kind: 'missing-source-trail',
+      detail: 'Article has no references — source trail block cannot be rendered',
+    });
+  }
+
+  return violations;
 }
