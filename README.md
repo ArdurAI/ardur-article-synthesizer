@@ -28,7 +28,8 @@ For each `Top10Entry`, the synthesizer:
    the reference list.
 3. **Generates original prose** per section via a **cost-guarded, pluggable AI
    provider** (deterministic → Ollama → OpenAI), with a deterministic fallback
-   that is itself a complete, publishable article.
+   that remains in the Ardur voice and is held for editorial review when AI
+   generation is unavailable.
 4. **Assembles** the prose into the in-app `ArticleBlock[]` render model.
 5. **Proves provenance** — every factual claim is mapped to the sources that
    support it; ungrounded claims are dropped.
@@ -37,12 +38,8 @@ For each `Top10Entry`, the synthesizer:
    bodies. Anything that fails the gate degrades to a stricter deterministic
    article and records a warning. **It never aborts the cycle.**
 
-The output is an `ArticleArtifact` — one `SynthesizedArticle` per Top-10 entry —
-that the ardur.ai app renders directly.
-
-> **This repo is a design spec + scaffold.** The synthesis logic is intentionally
-> **not implemented**. See [`docs/spec.md`](./docs/spec.md) for the full design
-> and [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the pipeline-wide contract.
+The output is an `ArticleArtifact` with published `articles` and a separate
+`heldArticles` editorial queue for deterministic or ungrounded fallbacks.
 
 ## Baked-in guarantees
 
@@ -62,8 +59,9 @@ npm install
 npm run typecheck   # tsc --noEmit
 npm test            # node --test (deterministic, zero network)
 npm run build       # tsc -> dist/
+npm run test:package # pack + fresh consumer import smoke
 
-# once implemented:
+# run deterministic synthesis against local artifacts:
 ARDUR_AI_PROVIDER=deterministic npm run synthesize \
   --top10 data/runtime/top10.json \
   --aggregation data/runtime/aggregation.json \
@@ -85,10 +83,12 @@ const articles: ArticleArtifact = await runSynthesis({
 });
 ```
 
-`runSynthesis` returns one `SynthesizedArticle` per `Top10Entry`, each carrying
-`body: ArticleBlock[]`, `references`, `provenance`, `ai` (provider meta), and a
-`legalNote`. See [`src/contracts.ts`](./src/contracts.ts) (the shared, vendored
-contract — identical in all four repos).
+`runSynthesis` returns a cycle artifact with `articles` for publishable,
+AI-grounded output and `heldArticles` for deterministic or ungrounded fallbacks.
+Each synthesized article carries `body: ArticleBlock[]`, `references`,
+`provenance`, `ai` (provider meta), and a `legalNote`. See
+[`src/contracts.ts`](./src/contracts.ts), the package shim over the shared
+contract.
 
 ## Relationship to the existing ardur.ai system
 

@@ -9,7 +9,8 @@
     "node": ">=22"
   },
   "exports": {
-    ".": "./dist/index.js"
+    ".": "./dist/index.js",
+    "./contracts": "./dist/contracts.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -18,9 +19,11 @@
     "src"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test --experimental-strip-types src/smoke.test.ts",
+    "test:package": "node scripts/package-smoke.mjs",
+    "prepack": "npm run build",
     "synthesize": "node --experimental-strip-types src/cli.ts"
   },
   "keywords": [
@@ -36,7 +39,7 @@
     "url": "https://github.com/ArdurAI/ardur-article-synthesizer.git"
   },
   "dependencies": {
-    "@ardurai/contracts": "github:ArdurAI/ardur-contracts#4a47ec8",
+    "@ardurai/contracts": "https://github.com/ArdurAI/ardur-contracts/archive/4a47ec8d7302ad3b62a481f83acd7df79709ef79.tar.gz",
     "jsonrepair": "^3.14.0",
     "zod": "^3.25.76"
   },
