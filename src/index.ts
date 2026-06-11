@@ -14,10 +14,12 @@ import type {
   CycleMeta,
 } from './contracts.ts';
 import { synthesizeCycle } from './synthesize.ts';
+import type { ArticleArtifactExtended } from './synthesize.ts';
 import { createProvider } from './provider.ts';
 import type { AiProvider } from './provider.ts';
 
 export * from './contracts.ts';
+export type { ArticleArtifactExtended } from './synthesize.ts';
 export type { AiProvider, ProviderName, GenerateRequest, GenerateResult } from './provider.ts';
 export type {
   ClaimInput,
@@ -71,7 +73,7 @@ export interface SynthesisOptions {
  *  - A model failure/budget exhaustion degrades that article to the deterministic
  *    path and records a `warning` — it never aborts the run.
  */
-export function runSynthesis(options: SynthesisOptions): Promise<ArticleArtifact> {
+export function runSynthesis(options: SynthesisOptions): Promise<ArticleArtifactExtended> {
   const provider = options.provider ?? createProvider();
   const now = options.now ?? new Date();
 

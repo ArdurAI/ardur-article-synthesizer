@@ -108,11 +108,19 @@ export function buildProvenanceFromFacts(
 
     let supportingFactIds = validIds;
 
-    // Step 2: backstop overlap when no valid inline citations
+    // Step 2: backstop overlap when no valid inline citations.
+    // #20 (CWE-345): pure lexical overlap is insufficient — require at least one
+    // named entity from the fact to appear in the claim, plus a raised token
+    // threshold, so topic-vocabulary coincidence cannot fabricate support.
     if (supportingFactIds.length === 0 && facts.length > 0) {
       const claimTokens = contentTokensFact(claim.text);
-      const threshold = Math.max(2, Math.ceil(claimTokens.size * 0.25));
+      const threshold = Math.max(3, Math.ceil(claimTokens.size * 0.35));
       for (const fact of facts) {
+        // Entity gate: the claim must mention at least one of the fact's named entities.
+        const factEntityTokens = contentTokensFact(fact.entities.join(' '));
+        const hasEntityOverlap = [...factEntityTokens].some((t) => claimTokens.has(t));
+        if (!hasEntityOverlap) continue;
+
         const factTokens = contentTokensFact(
           `${fact.statement} ${fact.entities.join(' ')} ${fact.quantity?.metric ?? ''}`,
         );

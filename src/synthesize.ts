@@ -34,6 +34,17 @@ import type {
   ChartBlock,
 } from './contracts.ts';
 import { SCHEMA_VERSION, CONTRACT_REVISION, assertCompatibleArtifact } from './contracts.ts';
+
+/**
+ * ArticleArtifact extended with a separate held-articles queue (#18).
+ * `data.articles` contains ONLY published articles.
+ * `data.heldArticles` contains articles that passed copyright/render/credential
+ * gates but were held for editorial reasons (AI unavailable, ungrounded claims,
+ * no-facts path). The pipeline must NOT serve held articles to readers.
+ */
+export type ArticleArtifactExtended = Omit<ArticleArtifact, 'data'> & {
+  data: ArticleArtifact['data'] & { heldArticles: SynthesizedArticle[] };
+};
 import type { AiProvider } from './provider.ts';
 import { buildDeterministicDraft } from './provider.ts';
 import { planAssembly, toRenderBlocks, assembleArticle, buildChartBlocks } from './assemble.ts';
@@ -246,7 +257,9 @@ export async function synthesizeOne(
   // Step 3: AI-primary synthesis (S2) — if provider is unavailable → HOLD
   if (!provider.canGenerate()) {
     warnings.push(`AI budget exhausted for entry ${entry.rank} — article held`);
-    return { article: withItemClaims(buildHeldArticle(entry, effectiveMembers, 'ai-budget-exhausted', ctx.top10.runId, now), itemClaims), warnings };
+    const held = withItemClaims(buildHeldArticle(entry, effectiveMembers, 'ai-budget-exhausted', ctx.top10.runId, now), itemClaims);
+    // #18: run gates on held articles (credential/copyright/render screen)
+    return runFinalGates(held, effectiveMembers, entry.rank, warnings);
   }
 
   const genResult = await provider.generate({
@@ -263,7 +276,9 @@ export async function synthesizeOne(
   if (genResult.meta.provider === 'deterministic' || genResult.meta.status === 'fallback') {
     const reason = genResult.meta.reason ?? 'ai-unavailable';
     warnings.push(`AI unavailable for entry ${entry.rank} (${reason}) — article held`);
-    return { article: withItemClaims(buildHeldArticle(entry, effectiveMembers, reason, ctx.top10.runId, now), itemClaims), warnings };
+    const held = withItemClaims(buildHeldArticle(entry, effectiveMembers, reason, ctx.top10.runId, now), itemClaims);
+    // #18: run gates on held articles (credential/copyright/render screen)
+    return runFinalGates(held, effectiveMembers, entry.rank, warnings);
   }
 
   // LLM generated successfully — build initial blocks
@@ -306,7 +321,9 @@ export async function synthesizeOne(
 
         if (reaskResult.meta.provider === 'deterministic' || reaskResult.meta.status === 'fallback') {
           warnings.push(`Re-ask returned deterministic for entry ${entry.rank} — article held`);
-          return { article: withItemClaims(buildHeldArticle(entry, effectiveMembers, 'ungrounded-after-regrounding', ctx.top10.runId, now), itemClaims), warnings };
+          const held = withItemClaims(buildHeldArticle(entry, effectiveMembers, 'ungrounded-after-regrounding', ctx.top10.runId, now), itemClaims);
+          // #18: run gates on held articles
+          return runFinalGates(held, effectiveMembers, entry.rank, warnings);
         }
 
         // Rebuild with re-asked content
@@ -319,7 +336,9 @@ export async function synthesizeOne(
 
         if (!reaskProvenanceResult.isGrounded) {
           warnings.push(`Ungrounded claims persist after re-ask for entry ${entry.rank} — article held`);
-          return { article: withItemClaims(buildHeldArticle(entry, effectiveMembers, 'ungrounded-after-regrounding', ctx.top10.runId, now), itemClaims), warnings };
+          const held = withItemClaims(buildHeldArticle(entry, effectiveMembers, 'ungrounded-after-regrounding', ctx.top10.runId, now), itemClaims);
+          // #18: run gates on held articles
+          return runFinalGates(held, effectiveMembers, entry.rank, warnings);
         }
 
         // Re-ask succeeded — attach provenance
@@ -327,28 +346,26 @@ export async function synthesizeOne(
         return await runFinalGates(publishedArticle, effectiveMembers, entry.rank, warnings);
       } else {
         warnings.push(`Re-ask budget exhausted for entry ${entry.rank} — article held`);
-        return { article: withItemClaims(buildHeldArticle(entry, effectiveMembers, 'ungrounded-after-regrounding', ctx.top10.runId, now), itemClaims), warnings };
+        const held = withItemClaims(buildHeldArticle(entry, effectiveMembers, 'ungrounded-after-regrounding', ctx.top10.runId, now), itemClaims);
+        // #18: run gates on held articles
+        return runFinalGates(held, effectiveMembers, entry.rank, warnings);
       }
     }
 
     const publishedArticle = buildPublishedArticle(article, provenanceResult.claims, clusterFacts, itemClaims);
     return await runFinalGates(publishedArticle, effectiveMembers, entry.rank, warnings);
   } else {
-    // Legacy gate: title-token heuristic (rev-2 aggregator, no facts)
-    const legacyProvenanceMap = buildProvenance(article.id, claims, refs);
-
-    if (!isFullyGrounded(legacyProvenanceMap)) {
-      warnings.push(
-        `${legacyProvenanceMap.unsupportedClaimCount} ungrounded claim(s) in entry ${entry.rank} (rev-2 gate, no facts) — article held`,
-      );
-      return { article: withItemClaims(buildHeldArticle(entry, effectiveMembers, 'ungrounded-no-facts', ctx.top10.runId, now), itemClaims), warnings };
-    }
-
-    const publishedArticle = withItemClaims(
-      { ...article, editorialStatus: 'published' as const } as SynthesizedArticle,
+    // #19: legacy no-facts path — no ExtractedFacts available (rev-2 aggregator).
+    // Title-token overlap cannot verify that article claims are actually supported
+    // by source content; publishing on heuristic overlap alone is insufficient.
+    // ALWAYS HOLD until the upstream aggregator provides real facts.
+    warnings.push(`Entry ${entry.rank} has no extracted facts (rev-2 aggregator path) — article held`);
+    const held = withItemClaims(
+      buildHeldArticle(entry, effectiveMembers, 'no-facts-path', ctx.top10.runId, now),
       itemClaims,
     );
-    return await runFinalGates(publishedArticle, effectiveMembers, entry.rank, warnings);
+    // #18: run gates on held articles (credential/copyright/render screen)
+    return runFinalGates(held, effectiveMembers, entry.rank, warnings);
   }
 }
 
@@ -411,7 +428,7 @@ async function runFinalGates(
 // ---------------------------------------------------------------------------
 
 /** Synthesize every Top-10 entry into the final ArticleArtifact. */
-export async function synthesizeCycle(ctx: SynthesizeContext): Promise<ArticleArtifact> {
+export async function synthesizeCycle(ctx: SynthesizeContext): Promise<ArticleArtifactExtended> {
   const { top10, aggregation, now } = ctx;
 
   const gateWarnings: string[] = [];
@@ -439,7 +456,10 @@ export async function synthesizeCycle(ctx: SynthesizeContext): Promise<ArticleAr
     return true;
   });
 
-  const articles: SynthesizedArticle[] = [];
+  // #18: separate published and held articles so the pipeline can never
+  // accidentally serve held content to readers.
+  const publishedArticles: SynthesizedArticle[] = [];
+  const heldArticles: SynthesizedArticle[] = [];
   const warnings: string[] = [...cycleWarnings];
   let dropped = 0;
   let held = 0;
@@ -453,9 +473,13 @@ export async function synthesizeCycle(ctx: SynthesizeContext): Promise<ArticleAr
       dropped++;
     } else {
       const status = (article as { editorialStatus?: string }).editorialStatus;
-      if (status === 'held') held++;
-      else generated++;
-      articles.push(article);
+      if (status === 'held') {
+        held++;
+        heldArticles.push(article);
+      } else {
+        generated++;
+        publishedArticles.push(article);
+      }
     }
   }
 
@@ -466,8 +490,8 @@ export async function synthesizeCycle(ctx: SynthesizeContext): Promise<ArticleAr
   if (generationsUsed > 0) {
     warnings.push(`AI provider used ${generationsUsed}/${ctx.maxGenerations} generation budget`);
   }
-  if (generated === 0 && articles.length > 0) {
-    warnings.push(`All ${articles.length} article(s) are held — no AI-generated content published`);
+  if (generated === 0 && heldArticles.length > 0) {
+    warnings.push(`All ${heldArticles.length} article(s) are held — no AI-generated content published`);
   }
 
   return {
@@ -487,7 +511,9 @@ export async function synthesizeCycle(ctx: SynthesizeContext): Promise<ArticleAr
     },
     warnings,
     data: {
-      articles,
+      // #18: published-only; heldArticles is the editorial queue (separate).
+      articles: publishedArticles,
+      heldArticles,
       copyrightPolicy: {
         originalTextOnly: true,
         maxQuoteWords: 25,
@@ -496,5 +522,5 @@ export async function synthesizeCycle(ctx: SynthesizeContext): Promise<ArticleAr
         requireCanonicalLinks: true,
       },
     },
-  };
+  } as ArticleArtifactExtended;
 }

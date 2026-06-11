@@ -23,6 +23,7 @@
  * budget=0 article reads on-voice — not as dry newswire.
  */
 
+import { z } from 'zod';
 import type { ProviderMeta, Confidence, SourceRef, SourceTier, ExtractedFact } from './contracts.ts';
 import { VOICE_STYLE } from './style.ts';
 
@@ -85,6 +86,22 @@ export const ARTICLE_SCHEMA = {
   additionalProperties: false,
   required: ['headline', 'dek', 'sections', 'keyPoints', 'whyItMatters', 'readerAction', 'confidence', 'tags'],
 } as const;
+
+/**
+ * Zod schema for LLM-generated ArticleDraft (#22). Used in parseAndMergeDraft as
+ * a first-pass structural validator before the field-by-field merge fallback.
+ * passthrough() preserves any extra provider-specific fields without error.
+ */
+export const ArticleDraftSchema = z.object({
+  headline: z.string().min(1),
+  dek: z.string().min(1),
+  sections: z.record(z.string()),
+  keyPoints: z.array(z.string()),
+  whyItMatters: z.string().min(1),
+  readerAction: z.string().min(1),
+  confidence: z.enum(['high', 'medium', 'low']),
+  tags: z.array(z.string()),
+}).passthrough();
 
 /**
  * A provider generates one article draft from metadata. Implementations:
@@ -653,45 +670,53 @@ function buildUserPrompt(request: GenerateRequest): string {
   ].join('\n');
 }
 
-/** Parse model JSON output, falling back field-by-field from the deterministic draft. */
-function parseAndMergeDraft(raw: string, fallback: ArticleDraft): ArticleDraft {
-  let parsed: Partial<ArticleDraft> = {};
+/**
+ * Parse model JSON output, falling back field-by-field from the deterministic draft.
+ * #22: first try Zod structural validation; if that passes the whole object is used.
+ * On Zod failure, merge field-by-field so partial-valid output still contributes.
+ */
+export function parseAndMergeDraft(raw: string, fallback: ArticleDraft): ArticleDraft {
+  let parsed: unknown;
 
   try {
-    // Try direct parse first
-    parsed = JSON.parse(raw) as Partial<ArticleDraft>;
+    parsed = JSON.parse(raw);
   } catch {
-    // Try jsonrepair if available (optional dep)
     try {
-      // Dynamic import to avoid hard dependency at module load
       const repaired = repairJsonSync(raw);
-      parsed = JSON.parse(repaired) as Partial<ArticleDraft>;
+      parsed = JSON.parse(repaired);
     } catch {
       return fallback;
     }
   }
 
-  // Merge: for each required field, use the parsed value if it looks valid
+  // Zod fast-path: if the whole object is structurally valid, accept it directly.
+  const zodResult = ArticleDraftSchema.safeParse(parsed);
+  if (zodResult.success) {
+    return zodResult.data as ArticleDraft;
+  }
+
+  // Field-by-field merge: use parsed value per field only when type-safe.
+  const partial = parsed as Partial<ArticleDraft>;
   const VALID_CONFIDENCE: Confidence[] = ['high', 'medium', 'low'];
 
   return {
-    headline: typeof parsed.headline === 'string' && parsed.headline.trim() ? parsed.headline : fallback.headline,
-    dek: typeof parsed.dek === 'string' && parsed.dek.trim() ? parsed.dek : fallback.dek,
-    sections: mergeSections(parsed.sections, fallback.sections),
-    keyPoints: Array.isArray(parsed.keyPoints) && parsed.keyPoints.length > 0
-      ? parsed.keyPoints.filter((k) => typeof k === 'string')
+    headline: typeof partial.headline === 'string' && partial.headline.trim() ? partial.headline : fallback.headline,
+    dek: typeof partial.dek === 'string' && partial.dek.trim() ? partial.dek : fallback.dek,
+    sections: mergeSections(partial.sections, fallback.sections),
+    keyPoints: Array.isArray(partial.keyPoints) && partial.keyPoints.length > 0
+      ? partial.keyPoints.filter((k): k is string => typeof k === 'string')
       : fallback.keyPoints,
-    whyItMatters: typeof parsed.whyItMatters === 'string' && parsed.whyItMatters.trim()
-      ? parsed.whyItMatters
+    whyItMatters: typeof partial.whyItMatters === 'string' && partial.whyItMatters.trim()
+      ? partial.whyItMatters
       : fallback.whyItMatters,
-    readerAction: typeof parsed.readerAction === 'string' && parsed.readerAction.trim()
-      ? parsed.readerAction
+    readerAction: typeof partial.readerAction === 'string' && partial.readerAction.trim()
+      ? partial.readerAction
       : fallback.readerAction,
-    confidence: VALID_CONFIDENCE.includes(parsed.confidence as Confidence)
-      ? parsed.confidence as Confidence
+    confidence: VALID_CONFIDENCE.includes(partial.confidence as Confidence)
+      ? partial.confidence as Confidence
       : fallback.confidence,
-    tags: Array.isArray(parsed.tags) && parsed.tags.length > 0
-      ? parsed.tags.filter((t) => typeof t === 'string')
+    tags: Array.isArray(partial.tags) && partial.tags.length > 0
+      ? partial.tags.filter((t): t is string => typeof t === 'string')
       : fallback.tags,
   };
 }

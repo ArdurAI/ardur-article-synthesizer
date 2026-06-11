@@ -37,7 +37,8 @@
   },
   "dependencies": {
     "@ardurai/contracts": "github:ArdurAI/ardur-contracts#4a47ec8",
-    "jsonrepair": "^3.14.0"
+    "jsonrepair": "^3.14.0",
+    "zod": "^3.25.76"
   },
   "optionalDependencies": {
     "openai": "^6.42.0"

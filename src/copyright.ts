@@ -23,10 +23,18 @@ export const MAX_QUOTE_WORDS = 25;
 
 /**
  * Largest verbatim n-gram (in words) the body may share with any source's
- * title/summaryHint before it is treated as reproduced text rather than an
- * original sentence that happens to name the same entities.
+ * summaryHint before it is treated as reproduced text.
  */
 export const MAX_VERBATIM_NGRAM = 8;
+
+/**
+ * Largest verbatim n-gram (in words) the body may share with any source's
+ * title field (#21). Higher than the summaryHint threshold because the
+ * deterministic draft legitimately embeds short cluster headlines;
+ * threshold > 12 catches verbatim title reproduction without regressing on
+ * normal headline references (see issue #11 history).
+ */
+export const MAX_VERBATIM_TITLE_NGRAM = 12;
 
 export type CopyrightViolationKind =
   | 'quote-too-long'
@@ -114,33 +122,50 @@ export function enforceCopyright(
     }
   }
 
-  // 3. Verbatim overlap: non-quote body text vs. source summaryHints ONLY.
-  // Issue #11: article titles are factual identifiers (not protectable expression);
-  // including them in the corpus caused a deadlock where the deterministic fallback's
-  // legitimate headline references triggered the gate on clusters with ≥8-word titles.
-  const sourceTexts = corpus.map((item) => item.summaryHint).filter(Boolean);
+  // 3. Verbatim overlap: non-quote body text vs. source summaryHints AND titles.
+  // SummaryHints use MAX_VERBATIM_NGRAM (8).
+  // Titles use MAX_VERBATIM_TITLE_NGRAM (12) — #21: titles were previously excluded
+  // (issue #11) because the deterministic draft embeds the cluster headline verbatim
+  // via buildKeyTakeaway. A threshold above the longest typical headline (~12 tokens
+  // after normalisation) lets us catch true verbatim title reproduction without
+  // regressing on the legitimate headline embedding pattern.
+  const summaryHintTexts = corpus.map((item) => item.summaryHint).filter(Boolean);
+  const titleTexts = corpus.map((item) => item.title).filter(Boolean);
   const bodyText = article.body
     .filter((b) => b.type !== 'quote') // quotes are expected to share wording
     .map((b) => { const tb = b as { text?: string; items?: string[] }; return tb.text ?? (tb.items ?? []).join(' '); })
     .join(' ');
 
   if (bodyText.trim()) {
-    const overlap = longestVerbatimRun(bodyText, sourceTexts);
-    if (overlap > MAX_VERBATIM_NGRAM) {
+    const hintOverlap = longestVerbatimRun(bodyText, summaryHintTexts);
+    if (hintOverlap > MAX_VERBATIM_NGRAM) {
       violations.push({
         kind: 'verbatim-overlap',
-        detail: `Body has a ${overlap}-word verbatim run against source metadata (limit: ${MAX_VERBATIM_NGRAM})`,
+        detail: `Body has a ${hintOverlap}-word verbatim run against source summaryHints (limit: ${MAX_VERBATIM_NGRAM})`,
+      });
+    }
+    const titleOverlap = longestVerbatimRun(bodyText, titleTexts);
+    if (titleOverlap > MAX_VERBATIM_TITLE_NGRAM) {
+      violations.push({
+        kind: 'verbatim-overlap',
+        detail: `Body has a ${titleOverlap}-word verbatim run against source titles (limit: ${MAX_VERBATIM_TITLE_NGRAM})`,
       });
     }
   }
 
-  // 4. Credential/secret leak screen (ported from validate-articles.mjs)
+  // 4. Credential/secret leak screen (ported from validate-articles.mjs).
+  // #22: extend to cover all LLM-generated metadata fields — keyPoints, tags,
+  // whyItMatters and readerAction were previously unscreened.
   const fullText = [
     article.headline,
     article.dek,
     ...article.body.map((b) => { const tb = b as { text?: string; items?: string[] }; return tb.text ?? (tb.items ?? []).join(' '); }),
     article.legalNote,
-  ].join(' ');
+    ...(Array.isArray(article.keyPoints) ? article.keyPoints : []),
+    ...(Array.isArray(article.tags) ? article.tags : []),
+    article.whyItMatters ?? '',
+    article.readerAction ?? '',
+  ].filter(Boolean).join(' ');
 
   for (const pattern of CREDENTIAL_PATTERNS) {
     if (pattern.test(fullText)) {

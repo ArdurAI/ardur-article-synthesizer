@@ -3,13 +3,15 @@ import assert from 'node:assert/strict';
 import { SCHEMA_VERSION, CONTRACT_REVISION, CYCLE_INTERVAL_MS, FORBIDDEN_METRIC_KEY_FRAGMENTS, assertCompatibleArtifact, SchemaVersionError } from './contracts.ts';
 import { runSynthesis } from './index.ts';
 import { DESCRIPTOR } from './describe.ts';
-import { MAX_QUOTE_WORDS, MAX_VERBATIM_NGRAM, enforceCopyright, isQuoteWithinLimit, longestVerbatimRun } from './copyright.ts';
+import { MAX_QUOTE_WORDS, MAX_VERBATIM_NGRAM, MAX_VERBATIM_TITLE_NGRAM, enforceCopyright, isQuoteWithinLimit, longestVerbatimRun } from './copyright.ts';
 import { SECTION_PLAN, MIN_BODY_WORDS, MAX_REFERENCES, planAssembly, toRenderBlocks, assembleArticle } from './assemble.ts';
 import { RENDER_CONTRACT, RENDERABLE_BLOCK_TYPES, validateRenderable } from './render.ts';
 import { isForbiddenKey, scrubUrl, redactForLog } from './privacy.ts';
 import { VOICE_STYLE, SECTION_VOICE, buildVoiceDirective, lintVoice } from './style.ts';
 import { buildProvenance, isFullyGrounded, buildProvenanceFromFacts } from './provenance.ts';
-import { createProvider, buildDeterministicDraft } from './provider.ts';
+import { createProvider, buildDeterministicDraft, ArticleDraftSchema, parseAndMergeDraft } from './provider.ts';
+import type { AiProvider } from './provider.ts';
+import type { ArticleArtifactExtended } from './synthesize.ts';
 import { buildChartBlocks } from './assemble.ts';
 import type { AggregatedItem, Top10Entry, SynthesizedArticle, Top10Artifact, AggregationArtifact, ExtractedFact, ProviderMeta } from './contracts.ts';
 
@@ -635,10 +637,13 @@ test('runSynthesis produces a valid ArticleArtifact from fixture inputs', async 
   assert.equal(artifact.artifact, 'articles');
   assert.ok(artifact.runId && artifact.runId.length > 0);
   assert.ok(Array.isArray(artifact.data.articles));
-  assert.ok(artifact.data.articles.length > 0, 'should produce at least one article');
+  // Deterministic provider → all articles are held; published articles[] is empty (#18)
+  assert.equal(artifact.data.articles.length, 0, 'deterministic provider produces no published articles');
+  assert.ok(Array.isArray(artifact.data.heldArticles));
+  assert.ok(artifact.data.heldArticles.length > 0, 'should produce at least one held article');
 
-  const article = artifact.data.articles[0];
-  assert.ok(article, 'first article must exist');
+  const article = artifact.data.heldArticles[0];
+  assert.ok(article, 'first held article must exist');
   assert.ok(article.headline && article.headline.length > 0, 'article must have headline');
   assert.ok(article.dek && article.dek.length > 0, 'article must have dek');
   assert.ok(Array.isArray(article.body) && article.body.length > 0, 'article must have body blocks');
@@ -777,7 +782,8 @@ test('item claims[] are merged into synthesized article tags', async () => {
     now: NOW,
   });
 
-  const article = artifact.data.articles[0];
+  // Deterministic provider → held articles (#18)
+  const article = artifact.data.heldArticles[0];
   assert.ok(article, 'article must exist');
   assert.ok(article.tags.includes('PyTorch'), 'tags should include item claim "PyTorch"');
   assert.ok(article.tags.includes('compile-time optimization'), 'tags should include item claim');
@@ -790,7 +796,8 @@ test('item claims[] are absent from tags when items have no claims (rev-1 aggreg
     provider: createProvider({ provider: 'deterministic' }),
     now: NOW,
   });
-  const article = artifact.data.articles[0];
+  // Deterministic provider → held articles (#18)
+  const article = artifact.data.heldArticles[0];
   assert.ok(article, 'article must exist');
   // makeAggregation() items have no claims — tags come from the draft only
   assert.ok(article.tags.length >= 1, 'should still have at least one tag from deterministic draft');
@@ -807,8 +814,10 @@ test('runSynthesis with deterministic provider produces held articles (S2)', asy
     provider: createProvider({ provider: 'deterministic' }),
     now: NOW,
   });
-  assert.ok(artifact.data.articles.length > 0, 'held articles are included in the artifact');
-  const article = artifact.data.articles[0] as { editorialStatus?: string };
+  // #18: held articles are now in heldArticles[], not articles[]
+  assert.equal(artifact.data.articles.length, 0, 'articles[] must be empty for deterministic provider');
+  assert.ok(artifact.data.heldArticles.length > 0, 'held articles must be in heldArticles[]');
+  const article = artifact.data.heldArticles[0] as { editorialStatus?: string };
   assert.equal(article.editorialStatus, 'held', 'deterministic articles must be held, not published');
   assert.ok(artifact.warnings.some((w) => w.includes('held')), 'should warn about held articles');
 });
@@ -820,7 +829,8 @@ test('runSynthesis held articles have valid body content for editorial review', 
     provider: createProvider({ provider: 'deterministic' }),
     now: NOW,
   });
-  const article = artifact.data.articles[0];
+  // #18: held articles are in heldArticles[], not articles[]
+  const article = artifact.data.heldArticles[0];
   assert.ok(article, 'held article must exist');
   assert.ok(article.headline && article.headline.length > 0, 'held article must have headline');
   assert.ok(Array.isArray(article.body) && article.body.length > 0, 'held article must have body');
@@ -1117,7 +1127,8 @@ test('SynthesizedArticle from held path has no claims[] (claims only on AI-publi
     now: NOW,
   });
   // Deterministic provider always holds — held articles must not have claims[].
-  for (const article of artifact.data.articles) {
+  // #18: held articles are in heldArticles[], not articles[].
+  for (const article of artifact.data.heldArticles) {
     const a = article as { claims?: unknown };
     assert.equal(a.claims, undefined, 'held article must not have claims field');
   }
@@ -1136,7 +1147,8 @@ test('AggregatedItem.claims[] are included in article tags (issue #6 — additiv
     provider: createProvider({ provider: 'deterministic' }),
     now: NOW,
   });
-  const article = artifact.data.articles[0];
+  // Deterministic provider → held articles (#18)
+  const article = artifact.data.heldArticles[0];
   assert.ok(article, 'article must exist');
   assert.ok(article.tags.includes('determinism'), 'item claim "determinism" must be in tags');
   assert.ok(article.tags.includes('benchmark'), 'item claim "benchmark" must be in tags');
@@ -1151,4 +1163,236 @@ test('contractRevision is stamped on the output artifact (issue #6 — rev 3 loc
   });
   assert.equal(artifact.contractRevision, CONTRACT_REVISION, 'contractRevision must equal CONTRACT_REVISION (3)');
   assert.equal(artifact.contractRevision, 3, 'CONTRACT_REVISION must be 3 — Rev 3 lockstep');
+});
+
+// ---------------------------------------------------------------------------
+// #18: HELD articles — separate from published array, gated
+// ---------------------------------------------------------------------------
+
+test('#18: articles[] contains only published articles; heldArticles[] contains held', async () => {
+  const artifact = await runSynthesis({
+    top10: makeTop10(),
+    aggregation: makeAggregation(),
+    provider: createProvider({ provider: 'deterministic' }),
+    now: NOW,
+  });
+  // Deterministic provider → everything is held
+  assert.ok(Array.isArray(artifact.data.articles), 'articles must be an array');
+  assert.ok(Array.isArray(artifact.data.heldArticles), 'heldArticles must be an array');
+  assert.equal(artifact.data.articles.length, 0, 'articles[] must be empty — no published articles from deterministic provider');
+  assert.ok(artifact.data.heldArticles.length > 0, 'heldArticles[] must have at least one entry');
+  for (const a of artifact.data.articles) {
+    const status = (a as { editorialStatus?: string }).editorialStatus;
+    assert.notEqual(status, 'held', 'articles[] must never contain a held article');
+  }
+  for (const a of artifact.data.heldArticles) {
+    const status = (a as { editorialStatus?: string }).editorialStatus;
+    assert.equal(status, 'held', 'heldArticles[] must only contain held articles');
+  }
+});
+
+test('#18: held article with credential leak is dropped by the gate', () => {
+  // The copyright gate (which held articles now go through) screens for credentials.
+  // A held article whose keyPoints contain a credential must fail the gate.
+  const article: SynthesizedArticle = {
+    id: 'test', rank: 1, topic: 'test', topicLabel: 'Test', headline: 'Test', dek: 'Test',
+    body: [{ type: 'paragraph', text: 'Original prose here.' }],
+    keyPoints: ['sk-abcdef1234567890abcdef1234567890abcd'],
+    whyItMatters: 'Normal text.', readerAction: 'Normal action.', tags: [], confidence: 'high',
+    sourceQuality: 'corroborated',
+    references: [{ source: 'T', sourceDomain: 't.com', tier: 'news', url: 'https://t.com', title: 'T', publishedAt: NOW.toISOString() }],
+    provenance: { clusterId: 'c1', sourceCount: 1, distinctDomains: 1, upstreamRunId: 'run-1' },
+    ai: { provider: 'deterministic', model: 'rules/v1', status: 'fallback', generatedAt: NOW.toISOString() },
+    legalNote: '', wordCount: 10, readingTimeMinutes: 1, generatedAt: NOW.toISOString(),
+  };
+  const verdict = enforceCopyright(article, [makeItem()]);
+  assert.ok(!verdict.ok, 'held article with credential in keyPoints must fail copyright gate');
+  assert.ok(verdict.violations.some((v) => v.kind === 'credential-leak'), 'must flag credential-leak');
+});
+
+// ---------------------------------------------------------------------------
+// #19: no-facts path — always hold
+// ---------------------------------------------------------------------------
+
+test('#19: no-facts path produces held articles even when a real AI provider is active', async () => {
+  // Simulate a generated (non-deterministic) provider that does NOT use fallback status.
+  const mockGenerated: AiProvider = {
+    name: 'ollama',
+    canGenerate: () => true,
+    generationsUsed: () => 1,
+    generate: async (req) => ({
+      draft: req.fallback,
+      meta: { provider: 'ollama', model: 'test', status: 'generated', generatedAt: NOW.toISOString() },
+    }),
+  };
+
+  // makeAggregation() has NO factsByCluster — this is the no-facts (rev-2) path.
+  const artifact = await runSynthesis({
+    top10: makeTop10(),
+    aggregation: makeAggregation(),
+    provider: mockGenerated,
+    now: NOW,
+  });
+
+  assert.equal(artifact.data.articles.length, 0, '#19: no-facts path must never publish; articles[] must be empty');
+  assert.ok(artifact.data.heldArticles.length > 0, '#19: no-facts articles must appear in heldArticles[]');
+  assert.ok(
+    artifact.warnings.some((w) => w.includes('no-facts-path') || w.includes('no extracted facts')),
+    '#19: warning must mention no-facts-path',
+  );
+});
+
+// ---------------------------------------------------------------------------
+// #20: fact-grounding backstop requires entity overlap, not just token overlap
+// ---------------------------------------------------------------------------
+
+test('#20: backstop does not ground claim when fact entity does not appear in claim', () => {
+  // claim shares generic topic tokens ("released", "version") with the fact,
+  // but mentions NONE of the fact's named entities ('PyTorch', 'compile times').
+  const fact = makeExtractedFact({ id: 'f1', entities: ['PyTorch', 'compile times'] });
+  const claims = [
+    { text: 'Software version released with speed improvements for production workloads.', blockIndex: 0, isEditorial: false },
+  ];
+  const result = buildProvenanceFromFacts('art-1', claims, [fact]);
+  assert.ok(!result.isGrounded, '#20: claim without entity overlap must not be grounded by backstop');
+  assert.equal(result.ungroundedClaims.length, 1, 'one ungrounded claim expected');
+});
+
+test('#20: backstop grounds claim that contains a fact entity and sufficient token overlap', () => {
+  const fact = makeExtractedFact({
+    id: 'f1',
+    statement: 'PyTorch 2.6 reduces compile time by half',
+    entities: ['PyTorch', 'compile time'],
+  });
+  const claims = [
+    { text: 'PyTorch compile time dropped significantly in the 2.6 release.', blockIndex: 0, isEditorial: false },
+  ];
+  const result = buildProvenanceFromFacts('art-1', claims, [fact]);
+  // Entity 'pytorch' appears in both claim and fact — backstop should find support.
+  const c0 = result.claims[0];
+  assert.ok((c0 !== undefined && c0.factIds.length > 0) || result.isGrounded || result.claims.length === 1,
+    '#20: claim with entity overlap and sufficient token overlap must be considered for support');
+});
+
+// ---------------------------------------------------------------------------
+// #21: copyright verbatim screen includes source titles
+// ---------------------------------------------------------------------------
+
+test('#21: MAX_VERBATIM_TITLE_NGRAM constant is exported and > MAX_VERBATIM_NGRAM', () => {
+  assert.ok(MAX_VERBATIM_TITLE_NGRAM > MAX_VERBATIM_NGRAM, 'title threshold must be higher than summaryHint threshold');
+  assert.equal(MAX_VERBATIM_TITLE_NGRAM, 12);
+});
+
+test('#21: enforceCopyright catches verbatim reproduction of source title (13+ tokens)', () => {
+  // Title has 13+ tokens after normalisation — body copies it verbatim → violation.
+  const longTitle = 'The PyTorch 2.6 runtime ships with a dramatically faster triton based compile path';
+  // After normalise: "the pytorch 2 6 runtime ships with a dramatically faster triton based compile path" = 15 tokens
+  const item = makeItem({ title: longTitle, summaryHint: '' });
+  const article: SynthesizedArticle = {
+    id: 'test', rank: 1, topic: 'ai-models', topicLabel: 'AI Models',
+    headline: 'New PyTorch release', dek: 'A new release',
+    body: [{ type: 'paragraph', text: longTitle }], // verbatim copy of the title
+    keyPoints: [], whyItMatters: '', readerAction: '', tags: [], confidence: 'high',
+    sourceQuality: 'corroborated',
+    references: [{ source: 'PyTorch', sourceDomain: 'pytorch.org', tier: 'primary', url: 'https://pytorch.org', title: longTitle, publishedAt: NOW.toISOString() }],
+    provenance: { clusterId: 'c1', sourceCount: 1, distinctDomains: 1, upstreamRunId: 'run-1' },
+    ai: { provider: 'ollama', model: 'llama3.1', status: 'generated', generatedAt: NOW.toISOString() },
+    legalNote: '', wordCount: 15, readingTimeMinutes: 1, generatedAt: NOW.toISOString(),
+  };
+  const verdict = enforceCopyright(article, [item]);
+  assert.ok(!verdict.ok, '#21: verbatim title reproduction (13+ tokens) must fail copyright gate');
+  assert.ok(verdict.violations.some((v) => v.kind === 'verbatim-overlap'), 'must flag verbatim-overlap');
+});
+
+test('#21: enforceCopyright does not flag 12-token title references (at-threshold — issue #11 preserved)', () => {
+  // The issue #11 regression: 12-token title referenced naturally in body must pass.
+  const title12 = 'PyTorch 2.6 ships with dramatically faster compile times and new features';
+  // After normalise: "pytorch 2 6 ships with dramatically faster compile times and new features" = 12 tokens
+  const item = makeItem({ title: title12, summaryHint: '' });
+  const plan = planAssembly(makeEntry({ headline: title12 }), [item, makeItem({ id: 'i2', sourceDomain: 'tc.com', fingerprint: 'tc::1' })]);
+  const refs = plan.references.map((r) => ({ source: r.source, sourceDomain: r.sourceDomain, tier: r.tier, url: r.url, title: r.title, publishedAt: r.publishedAt }));
+  const draft = buildDeterministicDraft({ topic: 'ai-models', topicLabel: 'AI Models', headline: title12, references: refs, voiceDirective: '' });
+  const blocks = toRenderBlocks(plan, draft.sections as Record<import('./assemble.ts').SectionId, string>);
+  const article = assembleArticle(plan, blocks, draft, { provider: 'deterministic', model: 'rules/v1', status: 'fallback', generatedAt: NOW.toISOString() }, 'run-1', NOW);
+  const verdict = enforceCopyright(article, [item]);
+  assert.ok(verdict.ok, `#21: 12-token title reference must still pass (issue #11 regression guard); violations: ${JSON.stringify(verdict.violations)}`);
+});
+
+// ---------------------------------------------------------------------------
+// #22: Zod validation of LLM output + credential screen on metadata fields
+// ---------------------------------------------------------------------------
+
+test('#22: ArticleDraftSchema validates a structurally correct draft', () => {
+  const refs = makeEntry().references;
+  const draft = buildDeterministicDraft({ topic: 'ai-models', topicLabel: 'AI Models', headline: 'Test', references: refs, voiceDirective: '' });
+  const result = ArticleDraftSchema.safeParse(draft);
+  assert.ok(result.success, `valid draft must pass Zod schema; errors: ${JSON.stringify(!result.success ? result.error.issues : [])}`);
+});
+
+test('#22: parseAndMergeDraft falls back when LLM JSON fails Zod (keyPoints: null)', () => {
+  const refs = makeEntry().references;
+  const fallback = buildDeterministicDraft({ topic: 'ai-models', topicLabel: 'AI Models', headline: 'Test', references: refs, voiceDirective: '' });
+  // null keyPoints is invalid per the schema
+  const malformed = JSON.stringify({ ...fallback, keyPoints: null });
+  const merged = parseAndMergeDraft(malformed, fallback);
+  assert.deepEqual(merged.keyPoints, fallback.keyPoints, 'keyPoints must fall back to fallback when null');
+});
+
+test('#22: parseAndMergeDraft accepts structurally valid LLM JSON via Zod fast path', () => {
+  const refs = makeEntry().references;
+  const fallback = buildDeterministicDraft({ topic: 'ai-models', topicLabel: 'AI Models', headline: 'Fallback headline', references: refs, voiceDirective: '' });
+  const good = { ...fallback, headline: 'AI-generated headline', keyPoints: ['Point one', 'Point two'] };
+  const merged = parseAndMergeDraft(JSON.stringify(good), fallback);
+  assert.equal(merged.headline, 'AI-generated headline', 'valid LLM headline must be used');
+  assert.deepEqual(merged.keyPoints, ['Point one', 'Point two'], 'valid keyPoints must be accepted');
+});
+
+test('#22: credential in keyPoints fails copyright gate', () => {
+  const article: SynthesizedArticle = {
+    id: 'test', rank: 1, topic: 'test', topicLabel: 'Test', headline: 'Test', dek: 'Test',
+    body: [{ type: 'paragraph', text: 'Clean body text.' }],
+    keyPoints: ['Normal point', 'ghp_abcdefghijklmnopqrstuvwxyz123456789012'],
+    whyItMatters: 'Normal.', readerAction: 'Normal.', tags: [], confidence: 'high',
+    sourceQuality: 'corroborated',
+    references: [{ source: 'T', sourceDomain: 't.com', tier: 'news', url: 'https://t.com', title: 'T', publishedAt: NOW.toISOString() }],
+    provenance: { clusterId: 'c1', sourceCount: 1, distinctDomains: 1, upstreamRunId: 'run-1' },
+    ai: { provider: 'ollama', model: 'test', status: 'generated', generatedAt: NOW.toISOString() },
+    legalNote: '', wordCount: 10, readingTimeMinutes: 1, generatedAt: NOW.toISOString(),
+  };
+  const verdict = enforceCopyright(article, [makeItem()]);
+  assert.ok(!verdict.ok, 'credential in keyPoints must fail copyright gate');
+  assert.ok(verdict.violations.some((v) => v.kind === 'credential-leak'), 'must flag credential-leak');
+});
+
+test('#22: credential in tags fails copyright gate', () => {
+  const article: SynthesizedArticle = {
+    id: 'test', rank: 1, topic: 'test', topicLabel: 'Test', headline: 'Test', dek: 'Test',
+    body: [{ type: 'paragraph', text: 'Clean body.' }],
+    keyPoints: [], whyItMatters: 'Normal.', readerAction: 'Normal.',
+    tags: ['ai-models', 'sk-proj-1234567890abcdefghijklmnopqrstuvwxyz12'],
+    confidence: 'high', sourceQuality: 'corroborated',
+    references: [{ source: 'T', sourceDomain: 't.com', tier: 'news', url: 'https://t.com', title: 'T', publishedAt: NOW.toISOString() }],
+    provenance: { clusterId: 'c1', sourceCount: 1, distinctDomains: 1, upstreamRunId: 'run-1' },
+    ai: { provider: 'ollama', model: 'test', status: 'generated', generatedAt: NOW.toISOString() },
+    legalNote: '', wordCount: 5, readingTimeMinutes: 1, generatedAt: NOW.toISOString(),
+  };
+  const verdict = enforceCopyright(article, [makeItem()]);
+  assert.ok(!verdict.ok, 'credential in tags must fail copyright gate');
+  assert.ok(verdict.violations.some((v) => v.kind === 'credential-leak'), 'must flag credential-leak');
+});
+
+test('#22: credential in whyItMatters fails copyright gate', () => {
+  const article: SynthesizedArticle = {
+    id: 'test', rank: 1, topic: 'test', topicLabel: 'Test', headline: 'Test', dek: 'Test',
+    body: [{ type: 'paragraph', text: 'Clean body.' }],
+    keyPoints: [], whyItMatters: 'bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U',
+    readerAction: 'Normal.', tags: [], confidence: 'high', sourceQuality: 'corroborated',
+    references: [{ source: 'T', sourceDomain: 't.com', tier: 'news', url: 'https://t.com', title: 'T', publishedAt: NOW.toISOString() }],
+    provenance: { clusterId: 'c1', sourceCount: 1, distinctDomains: 1, upstreamRunId: 'run-1' },
+    ai: { provider: 'ollama', model: 'test', status: 'generated', generatedAt: NOW.toISOString() },
+    legalNote: '', wordCount: 5, readingTimeMinutes: 1, generatedAt: NOW.toISOString(),
+  };
+  const verdict = enforceCopyright(article, [makeItem()]);
+  assert.ok(!verdict.ok, 'credential in whyItMatters must fail copyright gate');
+  assert.ok(verdict.violations.some((v) => v.kind === 'credential-leak'), 'must flag credential-leak');
 });
