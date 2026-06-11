@@ -91,7 +91,7 @@ function sourceList(refs, max = 3) {
     const last = names[names.length - 1];
     return `${names.slice(0, -1).join(', ')}, and ${last ?? ''}`;
 }
-function shortBodyCue(value, maxWords = 7) {
+function shortBodyCue(value, maxWords = 5) {
     const words = value.trim().replace(/\s+/g, ' ').split(' ').filter(Boolean);
     if (words.length <= maxWords)
         return words.join(' ');

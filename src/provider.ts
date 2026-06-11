@@ -173,7 +173,7 @@ function sourceList(refs: SourceRef[], max = 3): string {
   return `${names.slice(0, -1).join(', ')}, and ${last ?? ''}`;
 }
 
-function shortBodyCue(value: string, maxWords = 7): string {
+function shortBodyCue(value: string, maxWords = 5): string {
   const words = value.trim().replace(/\s+/g, ' ').split(' ').filter(Boolean);
   if (words.length <= maxWords) return words.join(' ');
   return `${words.slice(0, maxWords).join(' ')}...`;

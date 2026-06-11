@@ -838,7 +838,7 @@ test('runSynthesis held articles have valid body content for editorial review', 
 });
 
 test('deterministic fallback avoids verbatim long source titles in article body', async () => {
-  const longTitle = 'Unpatched Langflow flaw CVE 2026 5027 exploited for unauthenticated remote code execution';
+  const longTitle = 'Zoho Corporation Unveils Nathu La, a Designed-in-House Server, in a Move Towards Technological Sovereignty and Inference Cost Reduction';
   const top10 = makeTop10();
   const entry = top10.data.global[0];
   assert.ok(entry, 'fixture entry must exist');
