@@ -56,6 +56,8 @@ export interface SynthesisOptions {
   now?: Date;
   /** Injected provider for tests; defaults to the env-resolved provider chain. */
   provider?: AiProvider;
+  /** Override the artifact run ID for deterministic replay (--run-id). */
+  runId?: string;
 }
 
 /**
@@ -80,5 +82,6 @@ export function runSynthesis(options: SynthesisOptions): Promise<ArticleArtifact
     maxGenerations: options.maxGenerations ?? 20,
     perCallTimeoutMs: options.perCallTimeoutMs ?? 20_000,
     now,
+    ...(options.runId !== undefined ? { runId: options.runId } : {}),
   });
 }

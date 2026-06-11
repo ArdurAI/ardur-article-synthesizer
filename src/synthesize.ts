@@ -52,6 +52,8 @@ export interface SynthesizeContext {
   maxGenerations: number;
   perCallTimeoutMs: number;
   now: Date;
+  /** Override the artifact run ID for deterministic replay (--run-id). */
+  runId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -472,7 +474,7 @@ export async function synthesizeCycle(ctx: SynthesizeContext): Promise<ArticleAr
     schemaVersion: SCHEMA_VERSION,
     contractRevision: CONTRACT_REVISION,
     artifact: 'articles',
-    runId: `synth-${top10.runId}-${now.toISOString()}`,
+    runId: ctx.runId ?? `synth-${top10.runId}-${now.toISOString()}`,
     upstreamRunId: top10.runId,
     generatedAt: now.toISOString(),
     cycle: top10.cycle,

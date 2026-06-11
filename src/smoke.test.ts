@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { SCHEMA_VERSION, CONTRACT_REVISION, CYCLE_INTERVAL_MS, FORBIDDEN_METRIC_KEY_FRAGMENTS, assertCompatibleArtifact, SchemaVersionError } from './contracts.ts';
 import { runSynthesis } from './index.ts';
+import { DESCRIPTOR } from './describe.ts';
 import { MAX_QUOTE_WORDS, MAX_VERBATIM_NGRAM, enforceCopyright, isQuoteWithinLimit, longestVerbatimRun } from './copyright.ts';
 import { SECTION_PLAN, MIN_BODY_WORDS, MAX_REFERENCES, planAssembly, toRenderBlocks, assembleArticle } from './assemble.ts';
 import { RENDER_CONTRACT, RENDERABLE_BLOCK_TYPES, validateRenderable } from './render.ts';
@@ -1028,4 +1029,126 @@ test('enforceCopyright still catches verbatim reproduction of summaryHint', () =
   const verdict = enforceCopyright(article, [item]);
   assert.ok(!verdict.ok, 'verbatim summaryHint copy should still fail the copyright gate');
   assert.ok(verdict.violations.some((v) => v.kind === 'verbatim-overlap'), 'should flag verbatim-overlap on summaryHint reproduction');
+});
+
+// ---------------------------------------------------------------------------
+// #17: deterministic ids + uniform CLI descriptor
+// ---------------------------------------------------------------------------
+
+test('runSynthesis uses injected runId for artifact.runId (deterministic replay)', async () => {
+  const artifact = await runSynthesis({
+    top10: makeTop10(),
+    aggregation: makeAggregation(),
+    provider: createProvider({ provider: 'deterministic' }),
+    now: NOW,
+    runId: 'replay-run-abc123',
+  });
+  assert.equal(artifact.runId, 'replay-run-abc123', 'artifact.runId must equal the injected runId');
+});
+
+test('runSynthesis artifact.generatedAt equals injected now (deterministic replay)', async () => {
+  const artifact = await runSynthesis({
+    top10: makeTop10(),
+    aggregation: makeAggregation(),
+    provider: createProvider({ provider: 'deterministic' }),
+    now: NOW,
+  });
+  assert.equal(artifact.generatedAt, NOW.toISOString(), 'generatedAt must equal the injected now');
+});
+
+test('two runSynthesis calls with identical now + runId produce identical runId and generatedAt', async () => {
+  const opts = {
+    top10: makeTop10(),
+    aggregation: makeAggregation(),
+    provider: createProvider({ provider: 'deterministic' }),
+    now: NOW,
+    runId: 'stable-id-999',
+  };
+  const a1 = await runSynthesis(opts);
+  const a2 = await runSynthesis(opts);
+  assert.equal(a1.runId, a2.runId, 'runId must be identical across replays');
+  assert.equal(a1.generatedAt, a2.generatedAt, 'generatedAt must be identical across replays');
+});
+
+test('default runId (no --run-id) is derived from top10.runId and now (stable formula)', async () => {
+  const artifact = await runSynthesis({
+    top10: makeTop10(),
+    aggregation: makeAggregation(),
+    provider: createProvider({ provider: 'deterministic' }),
+    now: NOW,
+  });
+  const expected = `synth-run-top10-1-${NOW.toISOString()}`;
+  assert.equal(artifact.runId, expected, 'default runId formula: synth-<top10.runId>-<now.toISOString()>');
+});
+
+// ---------------------------------------------------------------------------
+// --describe descriptor shape (#17)
+// ---------------------------------------------------------------------------
+
+test('DESCRIPTOR has required fields for tool registry / MCP server', () => {
+  assert.equal(DESCRIPTOR.name, 'ardur-article-synthesizer');
+  assert.equal(DESCRIPTOR.stage, 'articles');
+  assert.equal(DESCRIPTOR.contract.schemaVersion, SCHEMA_VERSION);
+  assert.equal(DESCRIPTOR.contract.contractRevision, CONTRACT_REVISION);
+  assert.ok(Array.isArray(DESCRIPTOR.flags) && DESCRIPTOR.flags.length > 0, 'flags list must be present');
+  const flagNames = DESCRIPTOR.flags.map((f) => f.flag);
+  assert.ok(flagNames.includes('--in'), 'must declare --in');
+  assert.ok(flagNames.includes('--provider'), 'must declare --provider');
+  assert.ok(flagNames.includes('--now'), 'must declare --now');
+  assert.ok(flagNames.includes('--run-id'), 'must declare --run-id');
+  assert.ok(flagNames.includes('--describe'), 'must declare --describe');
+});
+
+test('DESCRIPTOR input schema requires top10 and aggregation fields', () => {
+  assert.deepEqual(DESCRIPTOR.input.required, ['top10', 'aggregation']);
+  assert.ok('top10' in DESCRIPTOR.input.properties);
+  assert.ok('aggregation' in DESCRIPTOR.input.properties);
+});
+
+// ---------------------------------------------------------------------------
+// #6: claims[] additive field — consumption + emission verified
+// ---------------------------------------------------------------------------
+
+test('SynthesizedArticle from held path has no claims[] (claims only on AI-published articles)', async () => {
+  const artifact = await runSynthesis({
+    top10: makeTop10(),
+    aggregation: makeAggregation(),
+    provider: createProvider({ provider: 'deterministic' }),
+    now: NOW,
+  });
+  // Deterministic provider always holds — held articles must not have claims[].
+  for (const article of artifact.data.articles) {
+    const a = article as { claims?: unknown };
+    assert.equal(a.claims, undefined, 'held article must not have claims field');
+  }
+});
+
+test('AggregatedItem.claims[] are included in article tags (issue #6 — additive consumption)', async () => {
+  const itemWithClaims = makeItem({ claims: ['determinism', 'reproducibility'] });
+  const agg = makeAggregation();
+  agg.data.itemsByTopic['ai-models'] = [
+    itemWithClaims,
+    makeItem({ id: 'item-2', sourceDomain: 'techcrunch.com', claims: ['benchmark', 'performance'] }),
+  ];
+  const artifact = await runSynthesis({
+    top10: makeTop10(),
+    aggregation: agg,
+    provider: createProvider({ provider: 'deterministic' }),
+    now: NOW,
+  });
+  const article = artifact.data.articles[0];
+  assert.ok(article, 'article must exist');
+  assert.ok(article.tags.includes('determinism'), 'item claim "determinism" must be in tags');
+  assert.ok(article.tags.includes('benchmark'), 'item claim "benchmark" must be in tags');
+});
+
+test('contractRevision is stamped on the output artifact (issue #6 — rev 3 lockstep)', async () => {
+  const artifact = await runSynthesis({
+    top10: makeTop10(),
+    aggregation: makeAggregation(),
+    provider: createProvider({ provider: 'deterministic' }),
+    now: NOW,
+  });
+  assert.equal(artifact.contractRevision, CONTRACT_REVISION, 'contractRevision must equal CONTRACT_REVISION (3)');
+  assert.equal(artifact.contractRevision, 3, 'CONTRACT_REVISION must be 3 — Rev 3 lockstep');
 });
