@@ -878,8 +878,9 @@ test('buildProvenanceFromFacts backstop: grounds claims via entity overlap when 
     { text: 'PyTorch compile speed improved faster in the new release.', blockIndex: 0, isEditorial: false },
   ];
   const result = buildProvenanceFromFacts('art-1', claims, [fact]);
-  // Entity overlap is a backstop — may or may not hit the threshold
-  assert.ok(result.claims.length === 1, 'should produce one claim entry');
+  // Entity 'pytorch' appears in both claim and fact — backstop must find support.
+  assert.ok(result.isGrounded, 'entity overlap backstop must ground this claim');
+  assert.ok(result.claims[0] !== undefined && result.claims[0].factIds.length > 0, 'grounded claim must reference the supporting fact');
 });
 
 test('buildProvenanceFromFacts treats editorial blocks as always grounded', () => {
@@ -1268,10 +1269,11 @@ test('#20: backstop grounds claim that contains a fact entity and sufficient tok
     { text: 'PyTorch compile time dropped significantly in the 2.6 release.', blockIndex: 0, isEditorial: false },
   ];
   const result = buildProvenanceFromFacts('art-1', claims, [fact]);
-  // Entity 'pytorch' appears in both claim and fact — backstop should find support.
+  // Entity 'pytorch' appears in both claim and fact — backstop must ground this.
+  assert.ok(result.isGrounded, '#20: claim with entity overlap must be grounded by backstop');
   const c0 = result.claims[0];
-  assert.ok((c0 !== undefined && c0.factIds.length > 0) || result.isGrounded || result.claims.length === 1,
-    '#20: claim with entity overlap and sufficient token overlap must be considered for support');
+  assert.ok(c0 !== undefined && c0.factIds.length > 0,
+    '#20: grounded claim must reference the supporting fact id');
 });
 
 // ---------------------------------------------------------------------------
@@ -1580,4 +1582,325 @@ test('contracts #2: valid fixture inputs pass Tier-2 Zod gate without error', as
     now: NOW,
   });
   assert.equal(artifact.schemaVersion, SCHEMA_VERSION, 'valid fixtures must produce an artifact');
+});
+
+// ---------------------------------------------------------------------------
+// Regression tests — security hardening round (#24–#38)
+// ---------------------------------------------------------------------------
+
+// #25: Grounding bypass fix — citation of an unrelated fact must not pass the gate
+test('#25: grounding gate rejects citation of unrelated fact (bypass fix)', () => {
+  // Claim is about Acme Corp acquisitions; fact-1 is about PyTorch compile.
+  // No entity/token overlap exists — the verification step must reject the citation.
+  const fact = makeExtractedFact({ id: 'fact-1', entities: ['PyTorch', 'compile'], statement: 'PyTorch achieves 2x faster compile times' });
+  const claims = [{ text: 'Acme Corp acquired three competitors for $5 billion last week [FACT:fact-1].', blockIndex: 0, isEditorial: false }];
+  const result = buildProvenanceFromFacts('art-1', claims, [fact]);
+  assert.ok(!result.isGrounded, '#25: citation of an unrelated fact must not pass the grounding gate');
+  assert.equal(result.ungroundedClaims.length, 1, '#25: the fabricated claim must appear as ungrounded');
+});
+
+// #26: DoS resistance — O(n²) DP replaces O(n³) nested loop; must handle large inputs fast
+test('#26: longestVerbatimRun handles large inputs without DoS', () => {
+  const bigText = Array.from({ length: 2000 }, (_, i) => `word${i}`).join(' ');
+  const start = Date.now();
+  const run = longestVerbatimRun(bigText, [bigText]);
+  const elapsed = Date.now() - start;
+  assert.ok(elapsed < 2000, `#26: 2000-word vs 2000-word scan must complete in < 2s, took ${elapsed}ms`);
+  assert.ok(run > 0, '#26: identical inputs must produce a non-zero verbatim run');
+});
+
+test('#26: longestVerbatimRun caps at MAX_VERBATIM_SCAN_WORDS — extra words are ignored', () => {
+  // Two identically large texts; the cap means only the first N words are compared.
+  // The run must still be > 0 (cap allows prefix match) and must not hang.
+  const words = Array.from({ length: 1500 }, (_, i) => `tok${i}`).join(' ');
+  const start = Date.now();
+  const run = longestVerbatimRun(words, [words]);
+  assert.ok(Date.now() - start < 1000, '#26: capped scan must complete in < 1s');
+  assert.ok(run > 0, '#26: capped prefix overlap must be detected');
+});
+
+// #27: Budget enforcement — failed HTTP calls must consume budget (no unbounded retries)
+test('#27: failed provider calls consume budget (no unbounded retries)', async () => {
+  let callCount = 0;
+  const mockFetch = async () => {
+    callCount++;
+    return new Response(JSON.stringify({ error: 'internal error' }), { status: 500 });
+  };
+  const p = createProvider({
+    env: { OLLAMA_API_KEY: 'test-key' },
+    fetchFn: mockFetch as typeof fetch,
+    maxGenerations: 3,
+  });
+  const refs = makeEntry().references;
+  const fallback = buildDeterministicDraft({ topic: 'test', topicLabel: 'Test', headline: 'Test', references: refs, voiceDirective: '' });
+  const req = { topic: 'test', topicLabel: 'Test', headline: 'Test', references: refs, fallback, voiceDirective: '' };
+  for (let i = 0; i < 10; i++) { await p.generate(req); }
+  assert.ok(callCount <= 3, `#27: budget must cap at 3 real fetch calls, made ${callCount}`);
+  assert.equal(p.generationsUsed(), 3, '#27: generationsUsed must reflect all attempted calls');
+  assert.ok(!p.canGenerate(), '#27: canGenerate must return false after budget is exhausted');
+});
+
+// #28: Confidence derives from corroboration evidence, not LLM self-report
+test('#28: grounding correctly traces fact provenance for downstream confidence derivation', () => {
+  // Claim cites fact-1; fact-1 has 3 provenance domains.
+  // buildPublishedArticle uses these to compute confidence: ≥3 domains → 'high'.
+  // Here we verify the provenance chain is preserved by buildProvenanceFromFacts
+  // (the foundation that synthesize.ts relies on).
+  const factThreeDomains = makeExtractedFact({
+    id: 'fact-1',
+    entities: ['PyTorch', 'compile'],
+    statement: 'PyTorch achieves faster compile in v2.6',
+    provenance: [
+      { sourceDocId: 'd1', sourceDomain: 'pytorch.org', url: 'https://pytorch.org/blog' },
+      { sourceDocId: 'd2', sourceDomain: 'techcrunch.com', url: 'https://techcrunch.com/pytorch' },
+      { sourceDocId: 'd3', sourceDomain: 'arxiv.org', url: 'https://arxiv.org/pytorch' },
+    ],
+  });
+  const claims = [{ text: 'PyTorch compile speed improved substantially [FACT:fact-1].', blockIndex: 0, isEditorial: false }];
+  const result = buildProvenanceFromFacts('art-1', claims, [factThreeDomains]);
+  assert.ok(result.isGrounded, '#28: valid citation with entity match must be grounded');
+  assert.ok(result.claims[0] !== undefined, '#28: claim provenance entry must be produced');
+  assert.ok(result.claims[0].factIds.includes('fact-1'), '#28: fact ID must be preserved in provenance chain');
+  // The 3 domains are on the fact; confidence derivation in buildPublishedArticle
+  // will see them via fact.provenance — verify the factId round-trips correctly.
+  assert.equal(result.claims[0].factIds.length, 1, '#28: exactly one fact must support the claim');
+});
+
+// #29: XSS screen must cover metadata fields — not just body blocks
+test('#29: validateRenderable flags raw HTML injected into dek', () => {
+  const article: SynthesizedArticle = {
+    id: 'test', rank: 1, topic: 'test', topicLabel: 'Test',
+    headline: 'Test headline', dek: 'Normal text with <script>alert(1)</script> injection',
+    body: [{ type: 'paragraph', text: 'Clean body content.' }],
+    keyPoints: [], whyItMatters: '', readerAction: '', tags: [], confidence: 'high', sourceQuality: 'corroborated',
+    references: [{ source: 'T', sourceDomain: 't.com', tier: 'news', url: 'https://t.com', title: 'T', publishedAt: NOW.toISOString() }],
+    provenance: { clusterId: 'c1', sourceCount: 1, distinctDomains: 1, upstreamRunId: 'run-1' },
+    ai: { provider: 'deterministic', model: 'rules/v1', status: 'fallback', generatedAt: NOW.toISOString() },
+    legalNote: '', wordCount: 5, readingTimeMinutes: 1, generatedAt: NOW.toISOString(),
+  };
+  const violations = validateRenderable(article);
+  assert.ok(violations.some((v) => v.kind === 'raw-html-in-text'), '#29: raw HTML in dek must be caught by the render gate');
+});
+
+test('#29: validateRenderable flags raw HTML injected into headline', () => {
+  const article: SynthesizedArticle = {
+    id: 'test', rank: 1, topic: 'test', topicLabel: 'Test',
+    headline: 'PyTorch <img src=x onerror=alert(1)> ships fast', dek: 'Clean dek.',
+    body: [{ type: 'paragraph', text: 'Clean body.' }],
+    keyPoints: [], whyItMatters: '', readerAction: '', tags: [], confidence: 'high', sourceQuality: 'corroborated',
+    references: [{ source: 'T', sourceDomain: 't.com', tier: 'news', url: 'https://t.com', title: 'T', publishedAt: NOW.toISOString() }],
+    provenance: { clusterId: 'c1', sourceCount: 1, distinctDomains: 1, upstreamRunId: 'run-1' },
+    ai: { provider: 'deterministic', model: 'rules/v1', status: 'fallback', generatedAt: NOW.toISOString() },
+    legalNote: '', wordCount: 5, readingTimeMinutes: 1, generatedAt: NOW.toISOString(),
+  };
+  const violations = validateRenderable(article);
+  assert.ok(violations.some((v) => v.kind === 'raw-html-in-text'), '#29: raw HTML in headline must be caught');
+});
+
+test('#29: validateRenderable flags raw HTML injected into keyPoints', () => {
+  const article: SynthesizedArticle = {
+    id: 'test', rank: 1, topic: 'test', topicLabel: 'Test',
+    headline: 'Clean headline', dek: 'Clean dek.',
+    body: [{ type: 'paragraph', text: 'Clean body.' }],
+    keyPoints: ['Normal point', '<a href="javascript:void(0)">click me</a>'],
+    whyItMatters: '', readerAction: '', tags: [], confidence: 'high', sourceQuality: 'corroborated',
+    references: [{ source: 'T', sourceDomain: 't.com', tier: 'news', url: 'https://t.com', title: 'T', publishedAt: NOW.toISOString() }],
+    provenance: { clusterId: 'c1', sourceCount: 1, distinctDomains: 1, upstreamRunId: 'run-1' },
+    ai: { provider: 'deterministic', model: 'rules/v1', status: 'fallback', generatedAt: NOW.toISOString() },
+    legalNote: '', wordCount: 5, readingTimeMinutes: 1, generatedAt: NOW.toISOString(),
+  };
+  const violations = validateRenderable(article);
+  assert.ok(violations.some((v) => v.kind === 'raw-html-in-text'), '#29: raw HTML in keyPoints must be caught');
+});
+
+// #31: SSRF guard — https-only + private IP / loopback blocking
+test('#31: scrubUrl rejects http:// URLs (https-only enforcement)', () => {
+  assert.equal(scrubUrl('http://example.com/article'), '', '#31: http:// must be rejected');
+  assert.equal(scrubUrl('http://pytorch.org/blog'), '', '#31: http:// must be rejected even for known domains');
+});
+
+test('#31: scrubUrl blocks EC2 metadata endpoint (link-local SSRF)', () => {
+  assert.equal(scrubUrl('https://169.254.169.254/latest/meta-data/'), '', '#31: 169.254.x.x must be blocked');
+});
+
+test('#31: scrubUrl blocks RFC-1918 private ranges', () => {
+  assert.equal(scrubUrl('https://192.168.1.100/admin'), '', '#31: 192.168.x.x must be blocked');
+  assert.equal(scrubUrl('https://10.0.0.1/internal'), '', '#31: 10.x.x.x must be blocked');
+  assert.equal(scrubUrl('https://172.16.0.1/internal'), '', '#31: 172.16.x.x must be blocked');
+});
+
+test('#31: scrubUrl blocks loopback addresses', () => {
+  assert.equal(scrubUrl('https://127.0.0.1/test'), '', '#31: 127.x.x.x loopback must be blocked');
+  assert.equal(scrubUrl('https://localhost/test'), '', '#31: localhost must be blocked');
+});
+
+test('#31: scrubUrl passes valid public https URLs unchanged', () => {
+  const url = 'https://pytorch.org/blog/pytorch-2.6';
+  assert.equal(scrubUrl(url), url, '#31: valid public https URL must pass through unchanged');
+});
+
+// #32: runSynthesis must thread maxGenerations into the auto-created provider
+test('#32: runSynthesis with maxGenerations=0 produces a valid artifact without crashing', async () => {
+  // With maxGenerations=0, even if AI were available, no model calls should occur.
+  // The auto-created provider must honour the option (pre-fix it was ignored).
+  const artifact = await runSynthesis({
+    top10: makeTop10(),
+    aggregation: makeAggregation(),
+    maxGenerations: 0,
+    now: NOW,
+  });
+  assert.equal(artifact.schemaVersion, SCHEMA_VERSION, '#32: synthesis must complete with maxGenerations=0');
+  // All articles must be held when no AI calls are possible
+  const totalArticles = artifact.data.articles.length + artifact.data.heldArticles.length;
+  assert.ok(totalArticles > 0, '#32: held articles must still be produced with maxGenerations=0');
+});
+
+// #35: Short articles are confidence-downgraded to 'low', not dropped or held
+test('#35: short AI-generated article gets confidence downgraded to low (not held or dropped)', async () => {
+  const fact1 = makeExtractedFact({
+    id: 'fact-1',
+    entities: ['PyTorch', 'compile'],
+    statement: 'PyTorch achieves faster compile',
+    provenance: [{ sourceDocId: 'd1', sourceDomain: 'pytorch.org', url: 'https://pytorch.org/blog' }],
+  });
+  // Very short draft — only key-takeaway and ardur-take, both tiny.
+  // Word count will be well below MIN_BODY_WORDS (150).
+  const shortDraft = {
+    headline: 'PyTorch 2.6',
+    dek: 'Faster compile.',
+    sections: {
+      'key-takeaway': 'PyTorch compile faster [FACT:fact-1].',
+      'ardur-take': 'PyTorch compile improved [FACT:fact-1].',
+    },
+    keyPoints: [] as string[],
+    whyItMatters: 'Speed.',
+    readerAction: 'Upgrade.',
+    confidence: 'high' as const,
+    tags: [] as string[],
+  };
+  const mockProvider: AiProvider = {
+    name: 'ollama' as const,
+    canGenerate: () => true,
+    generationsUsed: () => 1,
+    generate: async (_req) => ({
+      draft: shortDraft,
+      meta: { provider: 'ollama', model: 'test-model', status: 'generated', generatedAt: NOW.toISOString() },
+    }),
+  };
+  const agg = makeAggregation();
+  const aggWithFacts = {
+    ...agg,
+    data: { ...agg.data, factsByCluster: { 'cluster-1': [fact1] } },
+  };
+  const artifact = await runSynthesis({
+    top10: makeTop10(),
+    aggregation: aggWithFacts as unknown as AggregationArtifact,
+    provider: mockProvider,
+    now: NOW,
+  });
+  // Article must be PUBLISHED (grounded), not held
+  assert.ok(artifact.data.articles.length > 0, '#35: grounded article must be published even when short');
+  const article = artifact.data.articles[0];
+  assert.ok(article !== undefined, '#35: first article must exist');
+  // Confidence must be downgraded to 'low' due to word count below MIN_BODY_WORDS
+  assert.equal(article.confidence, 'low', '#35: short article must have confidence downgraded to low');
+  // Warning must appear in the artifact
+  const hasWarning = artifact.warnings.some((w) => w.includes('minimum body words') || w.includes('below minimum'));
+  assert.ok(hasWarning, '#35: minimum body words warning must appear in artifact.warnings');
+});
+
+// #36: Word-boundary matching — "groundbreaking" must not trigger the "breaking" ban
+test('#36: lintVoice does not flag "groundbreaking" for banned word "breaking"', () => {
+  const offenders = lintVoice('This groundbreaking technology marks a meaningful shift.');
+  assert.ok(!offenders.includes('breaking'), '#36: word boundary must not flag "groundbreaking" for the "breaking" ban');
+});
+
+test('#36: lintVoice still flags standalone "breaking" (word-boundary positive case)', () => {
+  const offenders = lintVoice('This is breaking news from the conference.');
+  assert.ok(offenders.includes('breaking'), '#36: standalone "breaking" must still be flagged');
+});
+
+test('#36: lintVoice does not flag "insanely" for banned word "insane"', () => {
+  const offenders = lintVoice('This is insanely fast hardware.');
+  assert.ok(!offenders.includes('insane'), '#36: word boundary must not flag "insanely" for the "insane" ban');
+});
+
+test('#36: lintVoice still flags standalone "insane" and "unprecedented"', () => {
+  const offenders = lintVoice('This is insane and unprecedented progress.');
+  assert.ok(offenders.includes('insane'), '#36: standalone "insane" must still be flagged');
+  assert.ok(offenders.includes('unprecedented'), '#36: standalone "unprecedented" must still be flagged');
+});
+
+// #38: AI-primary publish happy-path — with grounded facts, an article is published (not held)
+test('#38: article is published (not held) when AI returns a fully-grounded draft', async () => {
+  // fact-1 has 3 distinct provenance domains → final confidence should be 'high'
+  const fact1 = makeExtractedFact({
+    id: 'fact-1',
+    entities: ['PyTorch', 'compile'],
+    statement: 'PyTorch achieves 2x faster compile in v2.6',
+    provenance: [
+      { sourceDocId: 'd1', sourceDomain: 'pytorch.org', url: 'https://pytorch.org/blog' },
+      { sourceDocId: 'd2', sourceDomain: 'techcrunch.com', url: 'https://techcrunch.com/pytorch' },
+      { sourceDocId: 'd3', sourceDomain: 'arxiv.org', url: 'https://arxiv.org/pytorch' },
+    ],
+  });
+
+  // All sections cite [FACT:fact-1] explicitly; all contain 'PyTorch' or 'compile'
+  // so the citation verification step (entity overlap) always passes.
+  const goodDraft = {
+    headline: 'PyTorch 2.6 compile speed doubles',
+    dek: 'PyTorch compile performance improved significantly in the 2.6 release.',
+    sections: {
+      'key-takeaway': 'PyTorch 2.6 achieves faster compile times than 2.5 on standard benchmarks, cutting startup overhead from minutes to seconds for most common architectures [FACT:fact-1].',
+      'why-this-matters': 'Faster compile in PyTorch means shorter iteration loops for builders running experiments; the PyTorch compile path improvements directly reduce developer toil on training infrastructure [FACT:fact-1].',
+      'what-happened': 'The PyTorch team shipped version 2.6 with a redesigned compile backend that reduces overhead and improves cache reuse, delivering measurable gains on transformer model training tasks [FACT:fact-1].',
+      'builder-view': 'Engineers familiar with the PyTorch 2.x compile path will find that the 2.6 update delivers on its promise; the eager mode fallback is rarely needed for stable architectures [FACT:fact-1].',
+      'open-questions': 'Whether PyTorch 2.6 compile time gains hold consistently across very large distributed training setups on heterogeneous hardware clusters remains an open engineering question worth tracking [FACT:fact-1].',
+      'ardur-take': 'PyTorch 2.6 compile improvements are real and meaningful; the compile path is now the right default for most builders training transformer models at scale [FACT:fact-1].',
+    },
+    keyPoints: ['PyTorch 2.6 ships faster compile path', 'Startup time reduced for common architectures'],
+    whyItMatters: 'Builders can iterate faster on model experiments with shorter compile cycles.',
+    readerAction: 'Upgrade to PyTorch 2.6 and enable the compile path for training loops.',
+    confidence: 'high' as const,
+    tags: ['pytorch', 'ml', 'compile'],
+  };
+
+  const mockProvider: AiProvider = {
+    name: 'ollama' as const,
+    canGenerate: () => true,
+    generationsUsed: () => 1,
+    generate: async (_req) => ({
+      draft: goodDraft,
+      meta: { provider: 'ollama', model: 'test-model', status: 'generated', generatedAt: NOW.toISOString() },
+    }),
+  };
+
+  const agg = makeAggregation();
+  const aggWithFacts = {
+    ...agg,
+    data: { ...agg.data, factsByCluster: { 'cluster-1': [fact1] } },
+  };
+
+  const artifact = await runSynthesis({
+    top10: makeTop10(),
+    aggregation: aggWithFacts as unknown as AggregationArtifact,
+    provider: mockProvider,
+    now: NOW,
+  });
+
+  assert.ok(artifact.data.articles.length > 0, '#38: AI article with grounded citations must be published (not held)');
+  const article = artifact.data.articles[0];
+  assert.ok(article !== undefined, '#38: first published article must exist');
+  assert.equal(
+    (article as SynthesizedArticle & { editorialStatus?: string }).editorialStatus,
+    'published',
+    '#38: article must have editorialStatus=published',
+  );
+  const articleWithClaims = article as SynthesizedArticle & { claims?: unknown[] };
+  assert.ok(
+    Array.isArray(articleWithClaims.claims) && articleWithClaims.claims.length > 0,
+    '#38: published article must have claim provenance attached',
+  );
+  // With 3 corroborating domains and a grounded draft, confidence must be high
+  assert.equal(article.confidence, 'high', '#38: 3-domain corroboration must produce confidence=high');
 });

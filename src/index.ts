@@ -74,8 +74,14 @@ export interface SynthesisOptions {
  *    path and records a `warning` — it never aborts the run.
  */
 export function runSynthesis(options: SynthesisOptions): Promise<ArticleArtifactExtended> {
-  const provider = options.provider ?? createProvider();
   const now = options.now ?? new Date();
+  // Thread caller-supplied budget/timeout/now into the auto-created provider so
+  // the library API honours these options (issue #32).
+  const provider = options.provider ?? createProvider({
+    ...(options.maxGenerations !== undefined ? { maxGenerations: options.maxGenerations } : {}),
+    ...(options.perCallTimeoutMs !== undefined ? { timeoutMs: options.perCallTimeoutMs } : {}),
+    now,
+  });
 
   return synthesizeCycle({
     top10: options.top10,

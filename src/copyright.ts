@@ -187,40 +187,41 @@ export function isQuoteWithinLimit(text: string, maxWords: number = MAX_QUOTE_WO
 }
 
 /**
+ * Maximum words scanned per source/candidate to bound the O(n²) DP (issue #26:
+ * DoS via unbounded summaryHint/title from upstream sources).
+ */
+const MAX_VERBATIM_SCAN_WORDS = 600;
+
+/**
  * Longest verbatim word-run shared between `candidate` and any string in
  * `sources`. Used to catch accidental reproduction of source phrasing.
  *
- * Algorithm: for every (source_start, candidate_start) pair where the first
- * words match, extend the run and record the maximum.
- * Complexity: O(|sources| * |src_words| * |cand_words| * run_len) — acceptable
- * for article-sized text (a few hundred words each).
+ * Algorithm: longest-common-substring DP (O(m*n)), bounded by
+ * MAX_VERBATIM_SCAN_WORDS per input to prevent crafted-source DoS (issue #26).
  */
 export function longestVerbatimRun(candidate: string, sources: readonly string[]): number {
   if (sources.length === 0) return 0;
 
-  const candWords = normalizeWords(candidate);
+  const candWords = normalizeWords(candidate).slice(0, MAX_VERBATIM_SCAN_WORDS);
   if (candWords.length === 0) return 0;
 
   let longest = 0;
 
   for (const source of sources) {
-    const srcWords = normalizeWords(source);
+    const srcWords = normalizeWords(source).slice(0, MAX_VERBATIM_SCAN_WORDS);
     if (srcWords.length === 0) continue;
 
-    for (let si = 0; si < srcWords.length; si++) {
-      for (let ci = 0; ci < candWords.length; ci++) {
-        if (srcWords[si] !== candWords[ci]) continue;
-        // Words match at (si, ci) — extend the run
-        let run = 1;
-        while (
-          si + run < srcWords.length &&
-          ci + run < candWords.length &&
-          srcWords[si + run] === candWords[ci + run]
-        ) {
-          run++;
+    // Space-optimized DP: dp[j] = longest common suffix of srcWords[0..i] and candWords[0..j].
+    let prev = new Array<number>(candWords.length + 1).fill(0);
+    for (let i = 0; i < srcWords.length; i++) {
+      const curr = new Array<number>(candWords.length + 1).fill(0);
+      for (let j = 0; j < candWords.length; j++) {
+        if (srcWords[i] === candWords[j]) {
+          curr[j + 1] = (prev[j] ?? 0) + 1;
+          if ((curr[j + 1] ?? 0) > longest) longest = curr[j + 1] ?? 0;
         }
-        if (run > longest) longest = run;
       }
+      prev = curr;
     }
   }
 

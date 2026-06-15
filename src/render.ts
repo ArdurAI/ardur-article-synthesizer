@@ -172,7 +172,27 @@ export function validateRenderable(article: SynthesizedArticle): RenderViolation
     }
   }
 
-  // 5. Total block count
+  // 5. Raw HTML in article metadata fields: headline, dek, keyPoints, callouts.
+  // The body-block loop above covers body[], but these LLM-controlled fields
+  // are also rendered (steps 1–2, 4, 6 in the render order) — issue #29 (CWE-79).
+  const metaStrings: string[] = [
+    article.headline ?? '',
+    article.dek ?? '',
+    ...(Array.isArray(article.keyPoints) ? article.keyPoints : []),
+    article.whyItMatters ?? '',
+    article.readerAction ?? '',
+  ];
+  for (const s of metaStrings) {
+    if (s && RAW_HTML_PATTERN.test(s)) {
+      violations.push({
+        kind: 'raw-html-in-text',
+        detail: 'Raw HTML detected in article metadata (headline/dek/keyPoints/callouts)',
+      });
+      break;
+    }
+  }
+
+  // 6. Total block count
   if (article.body.length > RENDER_CONTRACT.maxBlocks) {
     violations.push({
       kind: 'too-many-blocks',

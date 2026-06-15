@@ -106,14 +106,34 @@ export function buildProvenanceFromFacts(
     const citedIds = extractInlineCitations(claim.text);
     const validIds = [...citedIds].filter((id) => factById.has(id));
 
-    let supportingFactIds = validIds;
+    // Compute claim tokens once — reused for citation verification and the backstop.
+    const claimTokens = contentTokensFact(claim.text);
 
-    // Step 2: backstop overlap when no valid inline citations.
+    // Step 2: verify each cited fact has entity/token overlap with the claim.
+    // Inline citations are LLM-supplied hints, not proof (issue #25, CWE-345).
+    // A model that learns to append a known-good fact-id bypasses the gate unless
+    // we check that the cited fact actually supports the claim.
+    const verifiedIds = validIds.filter((id) => {
+      const fact = factById.get(id);
+      if (!fact) return false;
+      // Entity gate: at least one fact entity must appear in the claim
+      const factEntityTokens = contentTokensFact(fact.entities.join(' '));
+      if ([...factEntityTokens].some((t) => claimTokens.has(t))) return true;
+      // Fallback: significant token overlap between claim and fact content
+      const factTokens = contentTokensFact(
+        `${fact.statement} ${fact.entities.join(' ')} ${fact.quantity?.metric ?? ''}`,
+      );
+      const matchCount = [...factTokens].filter((t) => claimTokens.has(t)).length;
+      return matchCount >= Math.max(2, Math.ceil(Math.min(claimTokens.size, factTokens.size) * 0.25));
+    });
+
+    let supportingFactIds = verifiedIds;
+
+    // Step 3: backstop overlap when no verified inline citations.
     // #20 (CWE-345): pure lexical overlap is insufficient — require at least one
     // named entity from the fact to appear in the claim, plus a raised token
     // threshold, so topic-vocabulary coincidence cannot fabricate support.
     if (supportingFactIds.length === 0 && facts.length > 0) {
-      const claimTokens = contentTokensFact(claim.text);
       const threshold = Math.max(3, Math.ceil(claimTokens.size * 0.35));
       for (const fact of facts) {
         // Entity gate: the claim must mention at least one of the fact's named entities.

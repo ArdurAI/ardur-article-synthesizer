@@ -145,9 +145,12 @@ function wordCount(text: string): number {
   return text.trim().split(/\s+/).filter((w) => w.length > 0).length;
 }
 
-/** Remove raw HTML tags from text (safety, belt-and-suspenders). */
+/** Remove raw HTML tags from text (safety, belt-and-suspenders).
+ * Only strips actual HTML tags (tag name starts with a letter) so bare
+ * comparison operators like "latency < 2ms" are preserved (issue #36).
+ */
 function stripHtml(text: string): string {
-  return text.replace(/<[^>]+>/g, '');
+  return text.replace(/<\/?[a-z][a-z0-9-]*(\s[^>]*)?\/?>/gi, '');
 }
 
 /**
@@ -183,7 +186,9 @@ function applyVoiceLint(text: string, voice: VoiceStyle): string {
   for (const offender of offenders) {
     const replacement = REPLACEMENTS[offender];
     if (replacement !== undefined) {
-      const re = new RegExp(offender.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+      // Word-boundary anchors prevent "breaking" from matching "groundbreaking" (issue #36).
+      const escaped = offender.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const re = new RegExp(`(?<![a-z0-9])${escaped}(?![a-z0-9])`, 'gi');
       cleaned = cleaned.replace(re, replacement);
     }
   }

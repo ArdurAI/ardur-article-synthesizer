@@ -151,7 +151,10 @@ export function lintVoice(text: string, style: VoiceStyle = VOICE_STYLE): string
   const lower = text.toLowerCase();
 
   for (const lexeme of style.bannedLexicon) {
-    if (lower.includes(lexeme.toLowerCase())) {
+    // Word-boundary match so "breaking" doesn't flag "groundbreaking" (issue #36).
+    const escaped = lexeme.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const pattern = new RegExp(`(?<![a-z0-9])${escaped}(?![a-z0-9])`, 'i');
+    if (pattern.test(lower)) {
       offenders.push(lexeme);
     }
   }

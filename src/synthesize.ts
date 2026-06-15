@@ -48,10 +48,10 @@ export type ArticleArtifactExtended = Omit<ArticleArtifact, 'data'> & {
 };
 import type { AiProvider } from './provider.ts';
 import { buildDeterministicDraft } from './provider.ts';
-import { planAssembly, toRenderBlocks, assembleArticle, buildChartBlocks } from './assemble.ts';
+import { planAssembly, toRenderBlocks, assembleArticle, buildChartBlocks, MIN_BODY_WORDS } from './assemble.ts';
 import type { SectionId } from './assemble.ts';
 import { buildVoiceDirective } from './style.ts';
-import { buildProvenanceFromFacts, buildProvenance, isFullyGrounded } from './provenance.ts';
+import { buildProvenanceFromFacts } from './provenance.ts';
 import type { ClaimInput } from './provenance.ts';
 import { enforceCopyright } from './copyright.ts';
 import { validateRenderable } from './render.ts';
@@ -377,9 +377,29 @@ function buildPublishedArticle(
   facts: ExtractedFact[],
   itemClaims: string[],
 ): SynthesizedArticle {
+  // Derive confidence from distinct supporting domains (spec §4.4, issue #28).
+  // The LLM's self-reported confidence can be wrong or manipulated; derive it
+  // deterministically from the corroboration evidence instead.
+  const factById = new Map(facts.map((f) => [f.id, f]));
+  const corrobDomains = new Set<string>();
+  for (const cp of claimProvenances) {
+    if (!cp.isEditorial) {
+      for (const factId of cp.factIds) {
+        const fact = factById.get(factId);
+        if (fact) {
+          for (const p of fact.provenance) corrobDomains.add(p.sourceDomain);
+        }
+      }
+    }
+  }
+  // ≥3 distinct source domains → high; 2 → medium; ≤1 → low
+  const confidence: import('./contracts.ts').Confidence =
+    corrobDomains.size >= 3 ? 'high' : corrobDomains.size >= 2 ? 'medium' : 'low';
+
   const merged = {
     ...base,
     editorialStatus: 'published' as const,
+    confidence,
     facts,
     claims: claimProvenances,
     tags: [...new Set([...base.tags, ...itemClaims])],
@@ -407,6 +427,17 @@ async function runFinalGates(
   rank: number,
   warnings: string[],
 ): Promise<{ article: SynthesizedArticle | null; warnings: string[] }> {
+  // Enforce minimum body length per spec §5.2 (issue #35).
+  // Articles below the floor are downgraded to confidence:low with a warning —
+  // they are not held or dropped since that would suppress held articles from the
+  // editorial queue, but the confidence signal alerts downstream consumers.
+  if (article.wordCount < MIN_BODY_WORDS) {
+    warnings.push(
+      `Article rank ${rank} is below minimum body words (${article.wordCount} < ${MIN_BODY_WORDS}) — confidence downgraded to low`,
+    );
+    article = { ...article, confidence: 'low' };
+  }
+
   const copyrightResult = enforceCopyright(article, corpus);
   if (!copyrightResult.ok) {
     const kinds = copyrightResult.violations.map((v) => v.kind).join(', ');
