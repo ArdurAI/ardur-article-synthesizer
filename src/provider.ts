@@ -335,16 +335,19 @@ function buildTags(topicLabel: string, refs: SourceRef[]): string[] {
 
 /** Build a complete on-voice ArticleDraft from metadata alone. No network. */
 export function buildDeterministicDraft(
-  request: Omit<GenerateRequest, 'fallback'>,
+  request: Omit<GenerateRequest, 'fallback'> & {
+    /** Rev 4: story-specific lede from Top10Entry.summary; overrides the generic dek template. */
+    signalSummary?: string;
+  },
   confidence: Confidence = 'medium',
 ): ArticleDraft {
-  const { topic, topicLabel, headline, references } = request;
+  const { topic, topicLabel, headline, references, signalSummary } = request;
   const isCorroborated = new Set(references.map((r) => r.sourceDomain)).size >= 2;
   const topRef = references.find((r) => r.tier === 'primary' || r.tier === 'paper') ?? references[0];
 
   return {
     headline: topRef ? rewriteHeadline(headline, topRef) : headline,
-    dek: buildDek(topicLabel, references, isCorroborated),
+    dek: signalSummary ?? buildDek(topicLabel, references, isCorroborated),
     sections: {
       'key-takeaway': buildKeyTakeaway(headline, references, isCorroborated),
       'why-this-matters': buildWhyThisMatters(topicLabel, references, isCorroborated),

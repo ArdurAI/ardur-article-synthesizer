@@ -163,8 +163,16 @@ function buildHeldArticle(
 ): SynthesizedArticle {
   const refs = toSourceRefs(members.length > 0 ? members : entryReferencesToItems(entry));
   const plan = planAssembly(entry, members.length > 0 ? members : entryReferencesToItems(entry));
+  const entryAny = entry as typeof entry & { summary?: string };
   const heldDraft = buildDeterministicDraft(
-    { topic: entry.topic, topicLabel: entry.topicLabel, headline: entry.headline, references: refs, voiceDirective: buildVoiceDirective() },
+    {
+      topic: entry.topic,
+      topicLabel: entry.topicLabel,
+      headline: entry.headline,
+      references: refs,
+      voiceDirective: buildVoiceDirective(),
+      ...(entryAny.summary ? { signalSummary: entryAny.summary } : {}),
+    },
     entry.confidence,
   );
   const blocks = toRenderBlocks(plan, heldDraft.sections as Record<SectionId, string>);
@@ -250,8 +258,18 @@ export async function synthesizeOne(
   const refs = toSourceRefs(plan.references);
 
   // Build deterministic draft for context (NOT for publishing — only for the prompt fallback field)
+  // Rev 4: use entry.summary (story-specific lede from top10 engine) as the dek when available,
+  // killing the identical templated text across all stories.
+  const entryWithSummary = entry as typeof entry & { summary?: string };
   const deterministicDraft = buildDeterministicDraft(
-    { topic: entry.topic, topicLabel: entry.topicLabel, headline: entry.headline, references: refs, voiceDirective: buildVoiceDirective() },
+    {
+      topic: entry.topic,
+      topicLabel: entry.topicLabel,
+      headline: entry.headline,
+      references: refs,
+      voiceDirective: buildVoiceDirective(),
+      ...(entryWithSummary.summary ? { signalSummary: entryWithSummary.summary } : {}),
+    },
     entry.confidence,
   );
 
