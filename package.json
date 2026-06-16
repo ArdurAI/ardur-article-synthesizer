@@ -36,7 +36,7 @@
     "url": "https://github.com/ArdurAI/ardur-article-synthesizer.git"
   },
   "dependencies": {
-    "@ardurai/contracts": "github:ArdurAI/ardur-contracts#edbc60e1bd9f760bfa054f6cac0ff9f17d2e55ea",
+    "@ardurai/contracts": "github:ArdurAI/ardur-contracts#9d26c87ec265dd5f300911c9c8c6ff383d42f332",
     "zod": "^3.25.76"
   },
   "devDependencies": {

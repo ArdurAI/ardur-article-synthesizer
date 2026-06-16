@@ -672,7 +672,7 @@ test('runSynthesis copyright policy is embedded in the artifact', async () => {
 test('runSynthesis records a warning when cycle ids mismatch', async () => {
   const top10 = makeTop10();
   const aggregation = makeAggregation();
-  (aggregation as unknown as Record<string, unknown>).cycle = { id: 'different-cycle', windowStart: '2026-06-11T06:00:00Z', windowEnd: '2026-06-11T12:00:00Z' };
+  (aggregation as unknown as Record<string, unknown>).cycle = { id: '2026-05-01T00:00:00.000Z', windowStart: '2026-05-01T00:00:00.000Z', windowEnd: '2026-05-01T06:00:00.000Z' };
   const artifact = await runSynthesis({
     top10,
     aggregation,
@@ -837,8 +837,8 @@ test('runSynthesis held articles have valid body content for editorial review', 
   assert.ok(article.wordCount >= MIN_BODY_WORDS, 'held article must meet word count for editorial review');
 });
 
-test('CONTRACT_REVISION is 3 (Rev 3 published)', () => {
-  assert.equal(CONTRACT_REVISION, 3, 'CONTRACT_REVISION should be 3 after Rev 3 contracts');
+test('CONTRACT_REVISION is at least 4 (Rev 4 introduced signalId + summary)', () => {
+  assert.ok(CONTRACT_REVISION >= 4, `CONTRACT_REVISION should be >= 4; got ${CONTRACT_REVISION}`);
 });
 
 // ---------------------------------------------------------------------------
@@ -1155,15 +1155,15 @@ test('AggregatedItem.claims[] are included in article tags (issue #6 — additiv
   assert.ok(article.tags.includes('benchmark'), 'item claim "benchmark" must be in tags');
 });
 
-test('contractRevision is stamped on the output artifact (issue #6 — rev 3 lockstep)', async () => {
+test('contractRevision is stamped on the output artifact', async () => {
   const artifact = await runSynthesis({
     top10: makeTop10(),
     aggregation: makeAggregation(),
     provider: createProvider({ provider: 'deterministic' }),
     now: NOW,
   });
-  assert.equal(artifact.contractRevision, CONTRACT_REVISION, 'contractRevision must equal CONTRACT_REVISION (3)');
-  assert.equal(artifact.contractRevision, 3, 'CONTRACT_REVISION must be 3 — Rev 3 lockstep');
+  assert.equal(artifact.contractRevision, CONTRACT_REVISION, 'contractRevision must equal CONTRACT_REVISION');
+  assert.ok(CONTRACT_REVISION >= 4, `CONTRACT_REVISION must be >= 4 (Rev 4 introduced signalId+summary); got ${CONTRACT_REVISION}`);
 });
 
 // ---------------------------------------------------------------------------
